@@ -571,6 +571,30 @@ const GEMINI_VIDEO_MODELS: ProviderModel[] = [
   },
 ];
 
+// REVE models (hardcoded — no discovery API available)
+const REVE_MODELS: ProviderModel[] = [
+  {
+    id: "reve-2/text-to-image",
+    name: "REVE 2",
+    description: "REVE 2 text-to-image. State-of-the-art prompt adherence, photorealism, and typography. Supports multiple aspect ratios.",
+    provider: "reve",
+    capabilities: ["text-to-image"],
+    coverImage: undefined,
+    pricing: undefined,
+    pageUrl: "https://api.reve.com",
+  },
+  {
+    id: "reve-2/image-to-image",
+    name: "REVE 2 Edit",
+    description: "REVE 2 image editing. Modify images with natural-language instructions — adjust colors, text, composition, and perspective.",
+    provider: "reve",
+    capabilities: ["image-to-image"],
+    coverImage: undefined,
+    pricing: undefined,
+    pageUrl: "https://api.reve.com",
+  },
+];
+
 // WaveSpeed models are now fetched dynamically from https://api.wavespeed.ai/api/v3/models
 
 // ============ Replicate Types ============
@@ -1098,6 +1122,7 @@ export async function GET(
   const falKey = request.headers.get("X-Fal-Key") || process.env.FAL_API_KEY || null;
   const kieKey = request.headers.get("X-Kie-Key") || process.env.KIE_API_KEY || null;
   const wavespeedKey = request.headers.get("X-WaveSpeed-Key") || process.env.WAVESPEED_API_KEY || null;
+  const reveKey = request.headers.get("X-Reve-API-Key") || process.env.REVE_API_KEY || null;
 
   // Build list of all available providers (have keys from env or client headers)
   const availableProviders: string[] = ["gemini"]; // Gemini always available
@@ -1105,11 +1130,13 @@ export async function GET(
   if (replicateKey) availableProviders.push("replicate");
   if (kieKey) availableProviders.push("kie");
   if (wavespeedKey) availableProviders.push("wavespeed");
+  if (reveKey) availableProviders.push("reve");
 
-  // Determine which providers to fetch from (excluding gemini/kie - handled separately as hardcoded)
+  // Determine which providers to fetch from (excluding gemini/kie/reve - handled separately as hardcoded)
   const providersToFetch: ProviderType[] = [];
   let includeGemini = false;
   let includeKie = false;
+  let includeReve = false;
 
   if (providerFilter) {
     if (providerFilter === "gemini") {
@@ -1143,6 +1170,19 @@ export async function GET(
           { status: 400 }
         );
       }
+    } else if (providerFilter === "reve") {
+      // Only REVE requested - no external API calls needed (hardcoded models)
+      if (reveKey) {
+        includeReve = true;
+      } else {
+        return NextResponse.json<ModelsErrorResponse>(
+          {
+            success: false,
+            error: "REVE API key required. Add REVE_API_KEY to .env.local or configure in Settings.",
+          },
+          { status: 400 }
+        );
+      }
     } else if (providerFilter === "replicate" && replicateKey) {
       providersToFetch.push("replicate");
     } else if (providerFilter === "fal" && falKey) {
@@ -1152,6 +1192,7 @@ export async function GET(
     // Include all providers that have keys configured
     includeGemini = true; // Gemini always available
     includeKie = kieKey ? true : false; // Kie only if API key is configured
+    includeReve = reveKey ? true : false; // REVE only if API key is configured
     if (wavespeedKey) {
       providersToFetch.push("wavespeed"); // WaveSpeed if key is configured
     }
@@ -1209,6 +1250,21 @@ export async function GET(
       success: true,
       count: kieModels.length,
       cached: true, // Hardcoded models are effectively "cached"
+    };
+    anyFromCache = true;
+  }
+
+  // Add REVE models if included (hardcoded, no API call needed)
+  if (includeReve) {
+    let reveModels = REVE_MODELS;
+    if (searchQuery) {
+      reveModels = filterModelsBySearch(reveModels, searchQuery);
+    }
+    allModels.push(...reveModels);
+    providerResults["reve"] = {
+      success: true,
+      count: reveModels.length,
+      cached: true,
     };
     anyFromCache = true;
   }
