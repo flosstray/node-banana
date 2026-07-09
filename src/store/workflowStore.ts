@@ -794,7 +794,9 @@ const workflowStoreImpl: StateCreator<WorkflowStore> = (set, get) => ({
   },
 
   updateNodeData: (nodeId: string, data: Partial<WorkflowNodeData>) => {
-    const node = get().nodes.find((n) => n.id === nodeId);
+    const currentNodes = get().nodes;
+    const currentNodeIndex = currentNodes.findIndex((n) => n.id === nodeId);
+    const node = currentNodeIndex === -1 ? undefined : currentNodes[currentNodeIndex];
 
     // Debounced undo tracking: skip during execution and during node/edge deletion
     // (clearStaleInputImages calls updateNodeData as a side effect of deletion)
@@ -813,14 +815,29 @@ const workflowStoreImpl: StateCreator<WorkflowStore> = (set, get) => ({
       }, 500);
     }
 
-    set((state) => ({
-      nodes: state.nodes.map((node) =>
-        node.id === nodeId
-          ? { ...node, data: { ...node.data, ...data } as WorkflowNodeData }
-          : node
-      ) as WorkflowNode[],
-      hasUnsavedChanges: true,
-    }));
+    set((state) => {
+      let nodeIndex = currentNodeIndex;
+      let currentNode = state.nodes[nodeIndex];
+      if (currentNode?.id !== nodeId) {
+        nodeIndex = state.nodes.findIndex((node) => node.id === nodeId);
+        currentNode = state.nodes[nodeIndex];
+      }
+
+      if (nodeIndex === -1) {
+        return { hasUnsavedChanges: true };
+      }
+
+      const nodes = state.nodes.slice() as WorkflowNode[];
+      nodes[nodeIndex] = {
+        ...currentNode,
+        data: { ...currentNode.data, ...data } as WorkflowNodeData,
+      };
+
+      return {
+        nodes,
+        hasUnsavedChanges: true,
+      };
+    });
     // Recompute dimming if this is a switch or conditionalSwitch node and their control data changed
     if (node?.type === "switch" && "switches" in data) {
       get().recomputeDimmedNodes();
