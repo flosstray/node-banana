@@ -73,9 +73,8 @@ export function BaseNode({
   settingsPanel,
   dataTutorial,
 }: BaseNodeProps) {
-  const currentNodeIds = useWorkflowStore((state) => state.currentNodeIds);
   const setHoveredNodeId = useWorkflowStore((state) => state.setHoveredNodeId);
-  const isCurrentlyExecuting = currentNodeIds.includes(id);
+  const isCurrentlyExecuting = useWorkflowStore((state) => state.currentNodeIds.includes(id));
   const { getNodes, setNodes } = useReactFlow();
 
   const settingsPanelRef = useRef<HTMLDivElement>(null);
