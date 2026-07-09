@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Handle, Position, NodeProps, Node, useReactFlow } from "@xyflow/react";
 import { BaseNode } from "./BaseNode";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { OutputGalleryNodeData } from "@/types";
 import { useAdaptiveImageSrc } from "@/hooks/useAdaptiveImageSrc";
+import { useVideoBlobUrl } from "@/hooks/useVideoBlobUrl";
 import { defaultNodeDimensions } from "@/store/utils/nodeDefaults";
 import { downloadMedia as downloadMediaUtil } from "@/utils/downloadMedia";
 import { useShowHandleLabels } from "@/hooks/useShowHandleLabels";
@@ -21,6 +22,19 @@ function AdaptiveGalleryThumbnail({ src, alt, nodeId }: { src: string; alt: stri
       src={adaptiveSrc ?? undefined}
       alt={alt}
       className="w-full h-full object-cover"
+    />
+  );
+}
+
+function LightboxVideo({ src }: { src: string }) {
+  const blobUrl = useVideoBlobUrl(src);
+  return (
+    <video
+      src={blobUrl ?? undefined}
+      className="max-w-full max-h-[90vh] object-contain rounded"
+      controls
+      autoPlay
+      playsInline
     />
   );
 }
@@ -43,6 +57,121 @@ export function OutputGalleryNode({ id, data, selected }: NodeProps<OutputGaller
     ];
     return media;
   }, [nodeData.images, nodeData.videos]);
+
+  // Extract poster-frame thumbnails for video tiles once, instead of mounting N
+  // live <video> decoders. Data-URL video sources force Chrome to continuously
+  // re-parse base64; a static <img> poster keeps the grid cheap. Mirrors
+  // VideoStitchNode's extraction approach, keyed by the video's data URL.
+  const videoSrcs = useMemo(() => nodeData.videos || [], [nodeData.videos]);
+  const [videoThumbnails, setVideoThumbnails] = useState<Map<string, string>>(new Map());
+  // Ref-based cache so the effect doesn't read stale `videoThumbnails` state
+  const videoThumbnailsRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    let activeVideo: HTMLVideoElement | null = null;
+    let activeBlobUrl: string | null = null;
+
+    const cleanupVideo = (video: HTMLVideoElement, blobUrl?: string | null) => {
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      video.onseeked = null;
+      video.src = "";
+      video.load();
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+
+    const extractThumbnails = async () => {
+      const newThumbnails = new Map<string, string>();
+
+      for (const src of videoSrcs) {
+        if (cancelled) return;
+
+        // Reuse cached thumbnail if we already have one for this exact source
+        if (videoThumbnailsRef.current.has(src)) {
+          newThumbnails.set(src, videoThumbnailsRef.current.get(src)!);
+          continue;
+        }
+
+        const video = document.createElement("video");
+        activeVideo = video;
+        activeBlobUrl = null;
+        // Convert data URLs to blob URLs for metadata loading efficiency
+        // (avoids re-parsing the full base64 payload into the element).
+        let blobUrl: string | null = null;
+        if (src.startsWith("data:")) {
+          try {
+            const blob = await (await fetch(src)).blob();
+            if (cancelled) return;
+            blobUrl = URL.createObjectURL(blob);
+            activeBlobUrl = blobUrl;
+          } catch {
+            blobUrl = null;
+          }
+        }
+        try {
+          video.src = blobUrl ?? src;
+          video.crossOrigin = "anonymous";
+          video.muted = true;
+          video.preload = "metadata";
+
+          await new Promise<void>((resolve, reject) => {
+            video.onloadedmetadata = () => resolve();
+            video.onerror = () => reject(new Error("Failed to load video"));
+          });
+
+          if (cancelled) { cleanupVideo(video, blobUrl); return; }
+
+          const seekTime = video.duration * 0.25;
+          video.currentTime = seekTime;
+
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              video.onseeked = () => resolve();
+            }),
+            new Promise<void>((_, reject) =>
+              setTimeout(() => reject(new Error("Seek timeout")), 10_000)
+            ),
+          ]);
+
+          if (cancelled) { cleanupVideo(video, blobUrl); return; }
+
+          const canvas = document.createElement("canvas");
+          const thumbWidth = 160;
+          const rawAspectRatio = video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 0;
+          const aspectRatio = Number.isFinite(rawAspectRatio) && rawAspectRatio > 0 ? rawAspectRatio : 16 / 9;
+          canvas.width = thumbWidth;
+          canvas.height = Math.round(thumbWidth / aspectRatio);
+          const ctx = canvas.getContext("2d");
+          if (!ctx) { cleanupVideo(video, blobUrl); continue; }
+
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const thumbnail = canvas.toDataURL("image/jpeg", 0.7);
+          newThumbnails.set(src, thumbnail);
+        } catch (error) {
+          console.warn("Failed to extract gallery video thumbnail:", error);
+        }
+        cleanupVideo(video, blobUrl);
+        activeVideo = null;
+        activeBlobUrl = null;
+      }
+
+      if (!cancelled) {
+        videoThumbnailsRef.current = newThumbnails;
+        setVideoThumbnails(newThumbnails);
+      }
+    };
+
+    extractThumbnails();
+    return () => {
+      cancelled = true;
+      if (activeVideo) {
+        cleanupVideo(activeVideo, activeBlobUrl);
+        activeVideo = null;
+        activeBlobUrl = null;
+      }
+    };
+  }, [videoSrcs]);
 
   const openLightbox = useCallback((index: number) => {
     setLightboxIndex(index);
@@ -80,11 +209,18 @@ export function OutputGalleryNode({ id, data, selected }: NodeProps<OutputGaller
     const item = displayMedia[index];
     if (!item) return;
 
+    // displayMedia concatenates images then videos, so the flat lightbox index
+    // maps directly to an array index. Deriving it (rather than
+    // images.indexOf(item.src)) makes removal exact even when two items share a
+    // src — duplicate outputs or empty-string placeholders — and keeps the
+    // images/imageRefs (and videos/videoRefs) arrays positionally aligned.
+    const imageCount = nodeData.images?.length || 0;
+
     if (item.type === "image") {
       const images = [...(nodeData.images || [])];
       const imageRefs = [...(nodeData.imageRefs || [])];
-      const imgIndex = images.indexOf(item.src);
-      if (imgIndex !== -1) {
+      const imgIndex = index;
+      if (imgIndex >= 0 && imgIndex < images.length) {
         images.splice(imgIndex, 1);
         if (imgIndex < imageRefs.length) imageRefs.splice(imgIndex, 1);
       }
@@ -92,8 +228,8 @@ export function OutputGalleryNode({ id, data, selected }: NodeProps<OutputGaller
     } else {
       const videos = [...(nodeData.videos || [])];
       const videoRefs = [...(nodeData.videoRefs || [])];
-      const vidIndex = videos.indexOf(item.src);
-      if (vidIndex !== -1) {
+      const vidIndex = index - imageCount;
+      if (vidIndex >= 0 && vidIndex < videos.length) {
         videos.splice(vidIndex, 1);
         if (vidIndex < videoRefs.length) videoRefs.splice(vidIndex, 1);
       }
@@ -235,13 +371,15 @@ export function OutputGalleryNode({ id, data, selected }: NodeProps<OutputGaller
                 >
                   {item.type === "video" ? (
                     <>
-                      <video
-                        src={item.src}
-                        className="w-full h-full object-cover"
-                        muted
-                        playsInline
-                        preload="metadata"
-                      />
+                      {videoThumbnails.get(item.src) ? (
+                        <img
+                          src={videoThumbnails.get(item.src)}
+                          alt={`Video ${idx + 1}`}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full bg-neutral-800" />
+                      )}
                       {/* Video play icon overlay */}
                       <div className="absolute inset-0 flex items-center justify-center bg-black/20">
                         <svg className="w-5 h-5 text-white drop-shadow" fill="currentColor" viewBox="0 0 24 24">
@@ -268,13 +406,7 @@ export function OutputGalleryNode({ id, data, selected }: NodeProps<OutputGaller
           >
             <div className="relative max-w-full max-h-full" onClick={(e) => e.stopPropagation()}>
               {currentItem.type === "video" ? (
-                <video
-                  src={currentItem.src}
-                  className="max-w-full max-h-[90vh] object-contain rounded"
-                  controls
-                  autoPlay
-                  playsInline
-                />
+                <LightboxVideo src={currentItem.src} />
               ) : (
                 <img
                   src={currentItem.src}

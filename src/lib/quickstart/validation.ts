@@ -1,5 +1,6 @@
 import { WorkflowFile } from "@/store/workflowStore";
 import { NodeType, WorkflowNodeData } from "@/types";
+import { getEasingBezier } from "@/lib/easing-presets";
 
 interface ValidationError {
   path: string;
@@ -32,6 +33,9 @@ const VALID_NODE_TYPES: NodeType[] = [
   "easeCurve",
   "videoTrim",
   "videoFrameGrab",
+  "removeBackground",
+  "imageResize",
+  "gifEncoder",
   "router",
   "switch",
   "conditionalSwitch",
@@ -54,7 +58,7 @@ const DEFAULT_DIMENSIONS: Record<NodeType, { width: number; height: number }> = 
   generate3d: { width: 300, height: 300 },
   generateAudio: { width: 300, height: 280 },
   llmGenerate: { width: 320, height: 360 },
-  splitGrid: { width: 300, height: 320 },
+  splitGrid: { width: 300, height: 400 },
   output: { width: 320, height: 320 },
   outputGallery: { width: 320, height: 360 },
   imageCompare: { width: 400, height: 360 },
@@ -62,6 +66,9 @@ const DEFAULT_DIMENSIONS: Record<NodeType, { width: number; height: number }> = 
   easeCurve: { width: 340, height: 480 },
   videoTrim: { width: 360, height: 360 },
   videoFrameGrab: { width: 320, height: 320 },
+  removeBackground: { width: 320, height: 320 },
+  imageResize: { width: 320, height: 360 },
+  gifEncoder: { width: 480, height: 380 },
   router: { width: 200, height: 80 },
   switch: { width: 220, height: 120 },
   conditionalSwitch: { width: 260, height: 180 },
@@ -377,7 +384,7 @@ function createDefaultNodeData(type: NodeType): WorkflowNodeData {
       };
     case "easeCurve":
       return {
-        bezierHandles: [0.445, 0.05, 0.55, 0.95] as [number, number, number, number],
+        bezierHandles: getEasingBezier("easeInOutSine"),
         easingPreset: "easeInOutSine",
         inheritedFrom: null,
         outputDuration: 1.5,
@@ -404,6 +411,47 @@ function createDefaultNodeData(type: NodeType): WorkflowNodeData {
         outputImage: null,
         status: "idle",
         error: null,
+      };
+    case "removeBackground":
+      return {
+        model: "isnet_fp16",
+        outputImage: null,
+        status: "idle",
+        error: null,
+        progress: 0,
+      };
+    case "imageResize":
+      return {
+        sourceImage: null,
+        outputImage: null,
+        mode: "exact",
+        width: 128,
+        height: 128,
+        maxEdge: 128,
+        scalePct: 100,
+        fit: "contain",
+        padColor: "#00000000",
+        format: "png",
+        quality: 0.9,
+        outputDimensions: null,
+        outputBytes: null,
+        status: "idle",
+        error: null,
+      };
+    case "gifEncoder":
+      return {
+        clipOrder: [],
+        outputGif: null,
+        fps: 8,
+        loopCount: 0,
+        colorCount: 128,
+        dither: false,
+        targetMaxBytes: 128 * 1024,
+        outputBytes: null,
+        outputDimensions: null,
+        status: "idle",
+        error: null,
+        progress: 0,
       };
     case "router":
       return {};

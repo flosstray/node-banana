@@ -2,6 +2,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { executeVideoStitch, executeEaseCurve } from "../videoProcessingExecutors";
 import type { NodeExecutionContext } from "../types";
 import type { WorkflowNode } from "@/types";
+import { stitchVideosAsync } from "@/hooks/useStitchVideos";
+
+// Mock the stitch helper so the executor's cancellation wiring can be asserted
+// without running the real mediabunny encode.
+vi.mock("@/hooks/useStitchVideos", () => ({
+  stitchVideosAsync: vi.fn(),
+  checkEncoderSupport: vi.fn().mockResolvedValue(true),
+}));
+const mockStitchVideosAsync = stitchVideosAsync as unknown as ReturnType<typeof vi.fn>;
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -56,6 +65,11 @@ function makeCtx(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks resets call history but NOT implementations, so explicitly
+  // drop any per-test fetch/helper impl to avoid leaking across tests (a
+  // resolving fetch would make video-metadata probing hang other cases).
+  mockFetch.mockReset();
+  mockStitchVideosAsync.mockReset();
 });
 
 describe("executeVideoStitch", () => {
@@ -132,6 +146,68 @@ describe("executeVideoStitch", () => {
         (c[1] as Record<string, unknown>).progress === 0
     );
     expect(loadingCall).toBeDefined();
+  });
+});
+
+describe("executeVideoStitch — cancellation", () => {
+  function makeStitchNode(): WorkflowNode {
+    return {
+      id: "vs-1",
+      type: "videoStitch",
+      position: { x: 0, y: 0 },
+      data: {
+        outputVideo: null,
+        status: null,
+        error: null,
+        progress: 0,
+        encoderSupported: true,
+        loopCount: 1,
+      },
+    } as WorkflowNode;
+  }
+
+  function makeTwoVideoCtx(node: WorkflowNode, signal?: AbortSignal) {
+    return makeCtx(node, {
+      signal,
+      getConnectedInputs: vi.fn().mockReturnValue({
+        images: [],
+        videos: ["v1", "v2"],
+        audio: [],
+        text: null,
+        dynamicInputs: {},
+        easeCurve: null,
+      }),
+    });
+  }
+
+  it("threads ctx.signal into stitchVideosAsync", async () => {
+    mockFetch.mockResolvedValue({
+      blob: () => Promise.resolve(new Blob(["v"], { type: "video/mp4" })),
+    });
+    // Large output routes through URL.createObjectURL (mocked), avoiding FileReader.
+    mockStitchVideosAsync.mockResolvedValue({ size: 21 * 1024 * 1024, type: "video/mp4" } as Blob);
+    const controller = new AbortController();
+    const ctx = makeTwoVideoCtx(makeStitchNode(), controller.signal);
+
+    await executeVideoStitch(ctx);
+
+    expect(mockStitchVideosAsync).toHaveBeenCalled();
+    // signal is the 4th positional argument
+    expect(mockStitchVideosAsync.mock.calls[0][3]).toBe(controller.signal);
+  });
+
+  it("treats an AbortError from the helper as idle cancellation, not an error", async () => {
+    mockFetch.mockResolvedValue({
+      blob: () => Promise.resolve(new Blob(["v"], { type: "video/mp4" })),
+    });
+    mockStitchVideosAsync.mockRejectedValue(new DOMException("Aborted", "AbortError"));
+    const ctx = makeTwoVideoCtx(makeStitchNode());
+
+    await expect(executeVideoStitch(ctx)).rejects.toMatchObject({ name: "AbortError" });
+
+    const calls = (ctx.updateNodeData as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((c) => (c[1] as Record<string, unknown>).status === "idle")).toBe(true);
+    expect(calls.some((c) => (c[1] as Record<string, unknown>).status === "error")).toBe(false);
   });
 });
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, useEffect, DragEvent, useMemo } from "react";
+import { useCallback, useRef, useState, useEffect, DragEvent, useMemo, type ComponentType } from "react";
 import {
   ReactFlow,
   Background,
@@ -43,6 +43,9 @@ import {
   EaseCurveNode,
   VideoTrimNode,
   VideoFrameGrabNode,
+  RemoveBackgroundNode,
+  ImageResizeNode,
+  GifEncoderNode,
   RouterNode,
   SwitchNode,
   ConditionalSwitchNode,
@@ -52,6 +55,7 @@ import {
 const GLBViewerNode = dynamic(() => import("./nodes/GLBViewerNode").then(mod => ({ default: mod.GLBViewerNode })), { ssr: false });
 import { EditableEdge, ReferenceEdge, SharedEdgeGradients } from "./edges";
 import { ConnectionDropMenu, MenuAction } from "./ConnectionDropMenu";
+import { NodeSearchMenu } from "./NodeSearchMenu";
 import { MultiSelectToolbar } from "./MultiSelectToolbar";
 import { EdgeToolbar } from "./EdgeToolbar";
 import { GlobalImageHistory } from "./GlobalImageHistory";
@@ -72,18 +76,18 @@ import { PromptConstructorEditorModal } from "./modals/PromptConstructorEditorMo
 import { resolveTextSourcesThroughRouters } from "@/store/utils/connectedInputs";
 import { wouldCreateCycle } from "@/store/utils/executionUtils";
 import { parseVarTags } from "@/utils/parseVarTags";
-import { AnnotationModal } from "./AnnotationModal";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { ModelSearchDialog } from "./modals/ModelSearchDialog";
 import { LLMFallbackPopover } from "./nodes/LLMFallbackPopover";
 import { browseRegistry } from "@/utils/browseRegistry";
 import { useInlineParameters } from "@/hooks/useInlineParameters";
-import { SplitGridSettingsModal } from "./SplitGridSettingsModal";
+import { SplitGridTemplateModal } from "./splitgrid/SplitGridTemplateModal";
 import { createPortal } from "react-dom";
 import { useAnnotationStore } from "@/store/annotationStore";
 import { TutorialOverlay } from "./onboarding/TutorialOverlay";
 import { useFTUXStore } from "@/store/ftuxStore";
 
-const nodeTypes: NodeTypes = {
+const rawNodeTypes: NodeTypes = {
   imageInput: ImageInputNode,
   audioInput: AudioInputNode,
   videoInput: VideoInputNode,
@@ -104,11 +108,40 @@ const nodeTypes: NodeTypes = {
   easeCurve: EaseCurveNode,
   videoTrim: VideoTrimNode,
   videoFrameGrab: VideoFrameGrabNode,
+  removeBackground: RemoveBackgroundNode,
+  imageResize: ImageResizeNode,
+  gifEncoder: GifEncoderNode,
   router: RouterNode,
   switch: SwitchNode,
   conditionalSwitch: ConditionalSwitchNode,
   glbViewer: GLBViewerNode,
 };
+
+// Wrap every node component in a per-node error boundary so a single
+// throwing node (e.g. malformed data from a loaded workflow) renders a small
+// fallback card instead of unmounting the entire canvas/app.
+const withNodeErrorBoundary = (
+  type: string,
+  NodeComponent: ComponentType<Record<string, unknown>>
+): ComponentType<Record<string, unknown>> => {
+  const Wrapped = (props: Record<string, unknown>) => (
+    <ErrorBoundary label={type}>
+      <NodeComponent {...props} />
+    </ErrorBoundary>
+  );
+  Wrapped.displayName = `NodeErrorBoundary(${type})`;
+  return Wrapped;
+};
+
+const nodeTypes: NodeTypes = Object.fromEntries(
+  Object.entries(rawNodeTypes).map(([type, NodeComponent]) => [
+    type,
+    withNodeErrorBoundary(
+      type,
+      NodeComponent as ComponentType<Record<string, unknown>>
+    ),
+  ])
+) as NodeTypes;
 
 const edgeTypes: EdgeTypes = {
   editable: EditableEdge,
@@ -160,7 +193,7 @@ const getNodeHandles = (nodeType: string): { inputs: string[]; outputs: string[]
     case "nanoBanana":
       return { inputs: ["image", "text"], outputs: ["image"] };
     case "generateVideo":
-      return { inputs: ["image", "text", "audio"], outputs: ["video"] };
+      return { inputs: ["image", "video", "text", "audio"], outputs: ["video"] };
     case "generate3d":
       return { inputs: ["image", "text"], outputs: ["3d"] };
     case "generateAudio":
@@ -183,6 +216,11 @@ const getNodeHandles = (nodeType: string): { inputs: string[]; outputs: string[]
       return { inputs: ["video"], outputs: ["video"] };
     case "videoFrameGrab":
       return { inputs: ["video"], outputs: ["image"] };
+    case "removeBackground":
+    case "imageResize":
+      return { inputs: ["image"], outputs: ["image"] };
+    case "gifEncoder":
+      return { inputs: ["image"], outputs: ["image"] };
     case "router":
       return { inputs: ["image", "text", "video", "audio", "3d", "easeCurve", "generic-input"], outputs: ["image", "text", "video", "audio", "3d", "easeCurve", "generic-output"] };
     case "switch":
@@ -321,6 +359,10 @@ export function WorkflowCanvas() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [dropType, setDropType] = useState<"image" | "audio" | "workflow" | "node" | null>(null);
   const [connectionDrop, setConnectionDrop] = useState<ConnectionDropState | null>(null);
+  // Searchable "add node" menu shown on double-clicking the empty canvas.
+  const [nodeSearchMenu, setNodeSearchMenu] = useState<
+    { position: { x: number; y: number }; flowPosition: { x: number; y: number } } | null
+  >(null);
   const [isSplitting, setIsSplitting] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isBuildingWorkflow, setIsBuildingWorkflow] = useState(false);
@@ -469,6 +511,9 @@ export function WorkflowCanvas() {
     easeCurve: 'Ease Curve',
     videoTrim: 'Video Trim',
     videoFrameGrab: 'Frame Grab',
+    removeBackground: 'Remove Background',
+    imageResize: 'Image Resize',
+    gifEncoder: 'GIF Encoder',
     router: 'Router',
     switch: 'Switch',
     conditionalSwitch: 'Conditional Switch',
@@ -887,6 +932,18 @@ export function WorkflowCanvas() {
           return null;
         }
 
+        // GifEncoder has dynamic indexed image input handles (image-0, image-1, ...)
+        if (node.type === "gifEncoder" && needInput && handleType === "image") {
+          for (let i = 0; i < 50; i++) {
+            const candidateHandle = `image-${i}`;
+            const isOccupied = edges.some(
+              (edge) => edge.target === node.id && edge.targetHandle === candidateHandle
+            ) || batchUsed?.has(candidateHandle);
+            if (!isOccupied) return candidateHandle;
+          }
+          return null;
+        }
+
         // Router accepts any type — use typed handle if exists, otherwise generic
         if (node.type === "router" && needInput) {
           // Router accepts any type — use typed handle if that type is already active
@@ -1111,6 +1168,8 @@ export function WorkflowCanvas() {
         return (node.data as { outputImage: string | null }).outputImage;
       case "nanoBanana":
         return (node.data as { outputImage: string | null }).outputImage;
+      case "removeBackground":
+        return (node.data as { outputImage: string | null }).outputImage;
       default:
         return null;
     }
@@ -1147,25 +1206,33 @@ export function WorkflowCanvas() {
     }
   }, [loadWorkflow, showToast, captureSnapshot]);
 
-  // Create lightweight workflow state for chat (strip base64 images)
-  const chatWorkflowState = useMemo(() => {
-    const strippedNodes = stripBinaryData(nodes);
-    return {
-      nodes: strippedNodes.map(n => ({
+  // Create lightweight workflow state for chat (strip base64 images).
+  // Keep a ref to the raw nodes/edges and expose the stripped payload lazily via
+  // getters, so the expensive stripBinaryData/remap only runs when the value is
+  // actually read (at chat send time, when ChatPanel serializes it) rather than
+  // on every drag frame or execution-status tick.
+  const chatWorkflowRawRef = useRef({ nodes, edges });
+  chatWorkflowRawRef.current = { nodes, edges };
+  const chatWorkflowState = useMemo(() => ({
+    get nodes() {
+      const strippedNodes = stripBinaryData(chatWorkflowRawRef.current.nodes);
+      return strippedNodes.map(n => ({
         id: n.id,
         type: n.type,
         position: n.position,
         data: n.data,
-      })),
-      edges: edges.map(e => ({
+      }));
+    },
+    get edges() {
+      return chatWorkflowRawRef.current.edges.map(e => ({
         id: e.id,
         source: e.source,
         target: e.target,
         sourceHandle: e.sourceHandle || undefined,
         targetHandle: e.targetHandle || undefined,
-      })),
-    };
-  }, [nodes, edges]);
+      }));
+    },
+  }), []);
 
   // Compute selected node IDs for chat context scoping
   const selectedNodeIds = useMemo(() => nodes.filter(n => n.selected).map(n => n.id), [nodes]);
@@ -1252,14 +1319,20 @@ export function WorkflowCanvas() {
           sourceHandleIdForNewNode = "default";
         }
       } else if (handleType === "image") {
-        if (nodeType === "annotation" || nodeType === "output" || nodeType === "splitGrid" || nodeType === "outputGallery" || nodeType === "imageCompare") {
+        if (nodeType === "annotation" || nodeType === "output" || nodeType === "splitGrid" || nodeType === "outputGallery" || nodeType === "imageCompare" || nodeType === "removeBackground") {
           targetHandleId = "image";
-          // annotation also has an image output
-          if (nodeType === "annotation") {
+          // annotation and removeBackground also have an image output
+          if (nodeType === "annotation" || nodeType === "removeBackground") {
             sourceHandleIdForNewNode = "image";
           }
         } else if (nodeType === "nanoBanana" || nodeType === "generateVideo") {
           targetHandleId = "image";
+        } else if (nodeType === "imageResize") {
+          targetHandleId = "image";
+          sourceHandleIdForNewNode = "image";
+        } else if (nodeType === "gifEncoder") {
+          targetHandleId = "image-0";
+          sourceHandleIdForNewNode = "image";
         } else if (nodeType === "imageInput") {
           sourceHandleIdForNewNode = "image";
         }
@@ -1418,6 +1491,56 @@ export function WorkflowCanvas() {
     setConnectionDrop(null);
   }, []);
 
+  // Open the searchable "add node" menu at a screen position (double-click or
+  // right-click on the empty canvas).
+  const openNodeSearchMenu = useCallback(
+    (clientX: number, clientY: number) => {
+      if (isModalOpen || tutorialActive) return;
+      setConnectionDrop(null);
+      setNodeSearchMenu({
+        position: { x: clientX, y: clientY },
+        flowPosition: screenToFlowPosition({ x: clientX, y: clientY }),
+      });
+    },
+    [isModalOpen, tutorialActive, screenToFlowPosition]
+  );
+
+  // Double-clicking the empty canvas opens the node search menu.
+  const handlePaneDoubleClick = useCallback(
+    (event: React.MouseEvent) => {
+      // Only react to double-clicks on the empty pane, not on a node/edge/control.
+      const target = event.target as HTMLElement;
+      if (!target.classList?.contains("react-flow__pane")) return;
+      event.preventDefault();
+      openNodeSearchMenu(event.clientX, event.clientY);
+    },
+    [openNodeSearchMenu]
+  );
+
+  // Right-clicking the empty canvas opens the node search menu (instead of the
+  // browser context menu).
+  const handlePaneContextMenu = useCallback(
+    (event: React.MouseEvent | MouseEvent) => {
+      event.preventDefault();
+      openNodeSearchMenu(event.clientX, event.clientY);
+    },
+    [openNodeSearchMenu]
+  );
+
+  const handleNodeSearchSelect = useCallback(
+    (type: NodeType) => {
+      if (nodeSearchMenu) {
+        addNode(type, nodeSearchMenu.flowPosition);
+      }
+      setNodeSearchMenu(null);
+    },
+    [nodeSearchMenu, addNode]
+  );
+
+  const handleCloseNodeSearch = useCallback(() => {
+    setNodeSearchMenu(null);
+  }, []);
+
   // Get copy/paste functions and clipboard from store
   const copySelectedNodes = useWorkflowStore((state) => state.copySelectedNodes);
   const pasteNodes = useWorkflowStore((state) => state.pasteNodes);
@@ -1521,6 +1644,8 @@ export function WorkflowCanvas() {
     // Handle workflow execution (Ctrl/Cmd + Enter)
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
+      // Resume-from-pause is handled inside executeWorkflow when no explicit
+      // start node is given.
       executeWorkflow();
       return;
     }
@@ -1604,7 +1729,7 @@ export function WorkflowCanvas() {
             generate3d: { width: 300, height: 300 },
             generateAudio: { width: 300, height: 280 },
             llmGenerate: { width: 320, height: 360 },
-            splitGrid: { width: 300, height: 320 },
+            splitGrid: { width: 300, height: 400 },
             output: { width: 320, height: 320 },
             outputGallery: { width: 320, height: 360 },
             imageCompare: { width: 400, height: 360 },
@@ -1612,6 +1737,9 @@ export function WorkflowCanvas() {
             easeCurve: { width: 340, height: 480 },
             videoTrim: { width: 360, height: 360 },
             videoFrameGrab: { width: 320, height: 320 },
+            removeBackground: { width: 320, height: 320 },
+            imageResize: { width: 320, height: 360 },
+            gifEncoder: { width: 480, height: 380 },
             router: { width: 200, height: 80 },
             switch: { width: 220, height: 120 },
             conditionalSwitch: { width: 260, height: 180 },
@@ -1716,19 +1844,20 @@ export function WorkflowCanvas() {
 
         let currentY = sortedNodes[0].position.y;
 
-        sortedNodes.forEach((node) => {
+        const changes = sortedNodes.map((node) => {
           const nodeHeight = (node.style?.height as number) || (node.measured?.height) || 200;
 
-          onNodesChange([
-            {
-              type: "position",
-              id: node.id,
-              position: { x: alignX, y: currentY },
-            },
-          ]);
+          const change = {
+            type: "position" as const,
+            id: node.id,
+            position: { x: alignX, y: currentY },
+          };
 
           currentY += nodeHeight + STACK_GAP;
+          return change;
         });
+
+        onNodesChange(changes);
       } else if (event.key === "h" || event.key === "H") {
         // Stack horizontally - sort by current x position to maintain relative order
         const sortedNodes = [...selectedNodes].sort((a, b) => a.position.x - b.position.x);
@@ -1738,19 +1867,20 @@ export function WorkflowCanvas() {
 
         let currentX = sortedNodes[0].position.x;
 
-        sortedNodes.forEach((node) => {
+        const changes = sortedNodes.map((node) => {
           const nodeWidth = (node.style?.width as number) || (node.measured?.width) || 220;
 
-          onNodesChange([
-            {
-              type: "position",
-              id: node.id,
-              position: { x: currentX, y: alignY },
-            },
-          ]);
+          const change = {
+            type: "position" as const,
+            id: node.id,
+            position: { x: currentX, y: alignY },
+          };
 
           currentX += nodeWidth + STACK_GAP;
+          return change;
         });
+
+        onNodesChange(changes);
       } else if (event.key === "g" || event.key === "G") {
         // Arrange as grid
         const count = selectedNodes.length;
@@ -1777,21 +1907,21 @@ export function WorkflowCanvas() {
         );
 
         // Position each node in the grid
-        sortedNodes.forEach((node, index) => {
+        const changes = sortedNodes.map((node, index) => {
           const col = index % cols;
           const row = Math.floor(index / cols);
 
-          onNodesChange([
-            {
-              type: "position",
-              id: node.id,
-              position: {
-                x: startX + col * (maxWidth + STACK_GAP),
-                y: startY + row * (maxHeight + STACK_GAP),
-              },
+          return {
+            type: "position" as const,
+            id: node.id,
+            position: {
+              x: startX + col * (maxWidth + STACK_GAP),
+              y: startY + row * (maxHeight + STACK_GAP),
             },
-          ]);
+          };
         });
+
+        onNodesChange(changes);
       }
   }, [nodes, onNodesChange, copySelectedNodes, pasteNodes, clearClipboard, clipboard, getViewport, addNode, updateNodeData, executeWorkflow, setShortcutsDialogOpen, undo, redo]);
 
@@ -2112,11 +2242,13 @@ export function WorkflowCanvas() {
         onNodeDragStart={() => { isDraggingNodeRef.current = true; document.documentElement.classList.add("canvas-interacting"); }}
         onNodeDragStop={(event, node) => { isDraggingNodeRef.current = false; document.documentElement.classList.remove("canvas-interacting"); handleNodeDragStop(event, node); }}
         onSelectionChange={handleSelectionChange}
+        onDoubleClick={handlePaneDoubleClick}
+        onPaneContextMenu={handlePaneContextMenu}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         isValidConnection={isValidConnection}
         fitView
-        deleteKeyCode={["Backspace", "Delete"]}
+        deleteKeyCode={isModalOpen ? null : ["Backspace", "Delete"]}
         multiSelectionKeyCode="Shift"
         selectionOnDrag={
           canvasNavigationSettings.selectionMode === "altDrag" || canvasNavigationSettings.selectionMode === "shiftDrag"
@@ -2147,6 +2279,7 @@ export function WorkflowCanvas() {
         nodeClickDistance={5}
         zoomOnScroll={tutorialActive ? false : false}
         zoomOnPinch={tutorialActive ? false : !isModalOpen}
+        zoomOnDoubleClick={false}
         minZoom={0.1}
         maxZoom={4}
         defaultViewport={{ x: 0, y: 0, zoom: 1 }}
@@ -2226,6 +2359,12 @@ export function WorkflowCanvas() {
                 return "#60a5fa"; // blue-400 (trim/cut)
               case "videoFrameGrab":
                 return "#38bdf8"; // sky-400 (image from video)
+              case "removeBackground":
+                return "#2dd4bf"; // teal-400 (background removal)
+              case "imageResize":
+                return "#0d9488"; // teal-600 (image utility)
+              case "gifEncoder":
+                return "#f472b6"; // pink-400 (animated output)
               case "router":
                 return "#6b7280"; // neutral-500 (gray/slate utility theme)
               case "switch":
@@ -2367,6 +2506,15 @@ export function WorkflowCanvas() {
         />
       )}
 
+      {/* Node search menu (double-click empty canvas) */}
+      {nodeSearchMenu && (
+        <NodeSearchMenu
+          position={nodeSearchMenu.position}
+          onSelect={handleNodeSearchSelect}
+          onClose={handleCloseNodeSearch}
+        />
+      )}
+
       {/* Multi-select toolbar */}
       <MultiSelectToolbar />
 
@@ -2471,7 +2619,7 @@ export function WorkflowCanvas() {
         const node = getNodeById(expandingNode.id);
         if (!node) return null;
         return (
-          <SplitGridSettingsModal
+          <SplitGridTemplateModal
             nodeId={expandingNode.id}
             nodeData={node.data as any}
             onClose={() => setExpandingNode(null)}
@@ -2514,8 +2662,9 @@ export function WorkflowCanvas() {
         />
       )}
 
-      {/* AnnotationModal is globally managed by annotationStore */}
-      <AnnotationModal />
+      {/* AnnotationModal is globally managed by annotationStore and mounted
+          once at the app root (src/app/page.tsx) to avoid duplicate keydown
+          listeners firing shortcuts twice. */}
 
       {/* Tutorial overlay */}
       <TutorialOverlay />

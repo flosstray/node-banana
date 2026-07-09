@@ -9,8 +9,7 @@ import { deduplicatedFetch } from "@/utils/deduplicatedFetch";
 import { NanoBananaNodeData, AspectRatio, Resolution, ModelType, MODEL_DISPLAY_NAMES, ProviderType, SelectedModel, ModelInputDef } from "@/types";
 import { ProviderModel, ModelCapability } from "@/lib/providers/types";
 import { ModelSearchDialog } from "@/components/modals/ModelSearchDialog";
-import { useToast } from "@/components/Toast";
-import { getImageDimensions, calculateNodeSizePreservingHeight } from "@/utils/nodeDimensions";
+import { getImageDimensions } from "@/utils/nodeDimensions";
 import { ProviderBadge } from "./ProviderBadge";
 import { useInlineParameters } from "@/hooks/useInlineParameters";
 import { InlineParameterPanel } from "./InlineParameterPanel";
@@ -20,6 +19,10 @@ import { useAdaptiveImageSrc } from "@/hooks/useAdaptiveImageSrc";
 import { downloadMedia } from "@/utils/downloadMedia";
 import { useShowHandleLabels } from "@/hooks/useShowHandleLabels";
 import { HandleLabel } from "./HandleLabel";
+import { useLoadGenerationById } from "@/hooks/useLoadGenerationById";
+import { useGenerationCarousel } from "@/hooks/useGenerationCarousel";
+import { useErrorToast } from "@/hooks/useErrorToast";
+import { useAutoResizeOnMedia } from "@/hooks/useAutoResizeOnMedia";
 
 /** Reorder items so they read column-first in a row-based CSS grid.
  *  e.g. [1,2,3,4,5,6,7,8] with 2 cols → [1,5,2,6,3,7,4,8] */
@@ -61,10 +64,8 @@ export function GenerateImageNode({ id, data, selected }: NodeProps<NanoBananaNo
   const nodeData = data;
   const adaptiveOutputImage = useAdaptiveImageSrc(data.outputImage, id);
   const updateNodeData = useWorkflowStore((state) => state.updateNodeData);
-  const generationsPath = useWorkflowStore((state) => state.generationsPath);
   // Use stable selector for API keys to prevent unnecessary re-fetches
-  const { replicateApiKey, falApiKey, kieApiKey, replicateEnabled, kieEnabled } = useProviderApiKeys();
-  const [isLoadingCarouselImage, setIsLoadingCarouselImage] = useState(false);
+  const { replicateApiKey, falApiKey, kieApiKey, openaiApiKey, replicateEnabled, kieEnabled, openaiEnabled } = useProviderApiKeys();
   const [externalModels, setExternalModels] = useState<ProviderModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [modelsFetchError, setModelsFetchError] = useState<string | null>(null);
@@ -105,8 +106,12 @@ export function GenerateImageNode({ id, data, selected }: NodeProps<NanoBananaNo
     if (kieEnabled && kieApiKey) {
       providers.push({ id: "kie", name: "Kie.ai" });
     }
+    // Add OpenAI if configured
+    if (openaiEnabled && openaiApiKey) {
+      providers.push({ id: "openai", name: "OpenAI" });
+    }
     return providers;
-  }, [replicateEnabled, replicateApiKey, kieEnabled, kieApiKey]);
+  }, [replicateEnabled, replicateApiKey, kieEnabled, kieApiKey, openaiEnabled, openaiApiKey]);
 
   // Migrate legacy data: derive selectedModel from model field if missing
   useEffect(() => {
@@ -143,6 +148,9 @@ export function GenerateImageNode({ id, data, selected }: NodeProps<NanoBananaNo
       if (kieApiKey) {
         headers["X-Kie-Key"] = kieApiKey;
       }
+      if (openaiApiKey) {
+        headers["X-OpenAI-API-Key"] = openaiApiKey;
+      }
       const response = await deduplicatedFetch(`/api/models?provider=${currentProvider}&capabilities=${capabilities}`, { headers });
       if (response.ok) {
         const data = await response.json();
@@ -165,7 +173,7 @@ export function GenerateImageNode({ id, data, selected }: NodeProps<NanoBananaNo
     } finally {
       setIsLoadingModels(false);
     }
-  }, [currentProvider, replicateApiKey, falApiKey, kieApiKey]);
+  }, [currentProvider, replicateApiKey, falApiKey, kieApiKey, openaiApiKey]);
 
   useEffect(() => {
     fetchModels();
@@ -324,78 +332,24 @@ export function GenerateImageNode({ id, data, selected }: NodeProps<NanoBananaNo
     regenerateNode(id);
   }, [id, regenerateNode]);
 
-  const loadImageById = useCallback(async (imageId: string) => {
-    if (!generationsPath) {
-      console.error("Generations path not configured");
-      return null;
-    }
+  const loadImageById = useLoadGenerationById("image", "Image");
 
-    try {
-      const response = await fetch("/api/load-generation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          directoryPath: generationsPath,
-          imageId,
-        }),
-      });
-
-      const result = await response.json();
-      if (!result.success) {
-        // Missing images are expected when refs point to deleted/moved files
-        console.log(`Image not found: ${imageId}`);
-        return null;
-      }
-      return result.image;
-    } catch (error) {
-      console.warn("Error loading image:", error);
-      return null;
-    }
-  }, [generationsPath]);
-
-  const handleCarouselPrevious = useCallback(async () => {
-    const history = nodeData.imageHistory || [];
-    if (history.length === 0 || isLoadingCarouselImage) return;
-
-    const currentIndex = nodeData.selectedHistoryIndex || 0;
-    const newIndex = currentIndex === 0 ? history.length - 1 : currentIndex - 1;
-    const imageItem = history[newIndex];
-
-    setIsLoadingCarouselImage(true);
-    const image = await loadImageById(imageItem.id);
-    setIsLoadingCarouselImage(false);
-
-    if (image) {
-      updateNodeData(id, {
-        outputImage: image,
-        selectedHistoryIndex: newIndex,
-        status: "idle",
-        error: null,
-      });
-    }
-  }, [id, nodeData.imageHistory, nodeData.selectedHistoryIndex, isLoadingCarouselImage, loadImageById, updateNodeData]);
-
-  const handleCarouselNext = useCallback(async () => {
-    const history = nodeData.imageHistory || [];
-    if (history.length === 0 || isLoadingCarouselImage) return;
-
-    const currentIndex = nodeData.selectedHistoryIndex || 0;
-    const newIndex = (currentIndex + 1) % history.length;
-    const imageItem = history[newIndex];
-
-    setIsLoadingCarouselImage(true);
-    const image = await loadImageById(imageItem.id);
-    setIsLoadingCarouselImage(false);
-
-    if (image) {
-      updateNodeData(id, {
-        outputImage: image,
-        selectedHistoryIndex: newIndex,
-        status: "idle",
-        error: null,
-      });
-    }
-  }, [id, nodeData.imageHistory, nodeData.selectedHistoryIndex, isLoadingCarouselImage, loadImageById, updateNodeData]);
+  const {
+    isLoading: isLoadingCarouselImage,
+    handlePrevious: handleCarouselPrevious,
+    handleNext: handleCarouselNext,
+  } = useGenerationCarousel({
+    nodeId: id,
+    history: nodeData.imageHistory,
+    currentIndex: nodeData.selectedHistoryIndex,
+    loadFn: loadImageById,
+    buildUpdate: (image, newIndex) => ({
+      outputImage: image,
+      selectedHistoryIndex: newIndex,
+      status: "idle",
+      error: null,
+    }),
+  });
 
   // Handle model selection from browse dialog
   const handleBrowseModelSelect = useCallback((model: ProviderModel) => {
@@ -462,51 +416,11 @@ export function GenerateImageNode({ id, data, selected }: NodeProps<NanoBananaNo
     };
   }, [useGeminiGrid]);
 
-  // Track previous status to detect error transitions
-  const prevStatusRef = useRef(nodeData.status);
-
-  // Show toast when error occurs
-  useEffect(() => {
-    if (nodeData.status === "error" && prevStatusRef.current !== "error" && nodeData.error) {
-      useToast.getState().show("Generation failed", "error", true, nodeData.error);
-    }
-    prevStatusRef.current = nodeData.status;
-  }, [nodeData.status, nodeData.error]);
+  // Show toast when generation fails
+  useErrorToast(nodeData.status, nodeData.error, "Generation failed");
 
   // Auto-resize node when output image changes
-  const prevOutputImageRef = useRef<string | null>(null);
-  useEffect(() => {
-    // Only resize when outputImage transitions from null/different to a new value
-    if (!nodeData.outputImage || nodeData.outputImage === prevOutputImageRef.current) {
-      prevOutputImageRef.current = nodeData.outputImage ?? null;
-      return;
-    }
-    prevOutputImageRef.current = nodeData.outputImage;
-
-    // Use requestAnimationFrame to avoid React Flow update conflicts
-    requestAnimationFrame(() => {
-      getImageDimensions(nodeData.outputImage!).then((dims) => {
-        if (!dims) return;
-
-        const aspectRatio = dims.width / dims.height;
-
-        setNodes((nodes) =>
-          nodes.map((node) => {
-            if (node.id !== id) return node;
-
-            // Preserve user's manually set height if present
-            const currentHeight = typeof node.style?.height === 'number'
-              ? node.style.height
-              : undefined;
-
-            const newSize = calculateNodeSizePreservingHeight(aspectRatio, currentHeight);
-
-            return { ...node, style: { ...node.style, width: newSize.width, height: newSize.height } };
-          })
-        );
-      });
-    });
-  }, [id, nodeData.outputImage, setNodes]);
+  useAutoResizeOnMedia(id, nodeData.outputImage, getImageDimensions);
 
   return (
     <>

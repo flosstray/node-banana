@@ -88,6 +88,29 @@ describe("executeGenerateVideo", () => {
     await expect(executeGenerateVideo(ctx)).rejects.toThrow("Missing required inputs");
   });
 
+  it("should NOT throw when only a video input is connected (video-to-video)", async () => {
+    const node = makeNode();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, video: "data:video/mp4;base64,output" }),
+    });
+    const ctx = makeCtx(node, {
+      getConnectedInputs: vi.fn().mockReturnValue({
+        images: [],
+        videos: ["data:video/mp4;base64,input"],
+        audio: [],
+        text: null,
+        dynamicInputs: { video_url: "data:video/mp4;base64,input" },
+        easeCurve: null,
+      }),
+    });
+
+    await expect(executeGenerateVideo(ctx)).resolves.toBeUndefined();
+    // dynamicInputs (which carries the connected video) must be forwarded to /api/generate
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.dynamicInputs.video_url).toBe("data:video/mp4;base64,input");
+  });
+
   it("should throw when no model selected", async () => {
     const node = makeNode({ selectedModel: null });
     const ctx = makeCtx(node);

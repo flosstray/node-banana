@@ -842,4 +842,48 @@ describe("/api/models/[modelId] schema endpoint", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("isVideoInput classification", () => {
+    it("should classify video_url as a video input (not image)", async () => {
+      mockFetch.mockResolvedValueOnce(
+        createReplicateModelResponse({
+          video_url: { type: "string", format: "uri", description: "URL of the input video" },
+          upscale_factor: { type: "string", enum: ["2", "4"], default: "2" },
+        }, ["video_url"])
+      );
+
+      const modelId = `topazlabs/video-upscale-${testCounter}`;
+      const request = createMockSchemaRequest(modelId, "replicate");
+      const response = await GET(request, { params: Promise.resolve({ modelId }) });
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      const videoInput = data.inputs.find((i: { name: string }) => i.name === "video_url");
+      expect(videoInput).toBeDefined();
+      expect(videoInput.type).toBe("video");
+    });
+
+    it("should keep first_frame/last_frame as image inputs while bare 'video' is a video input", async () => {
+      mockFetch.mockResolvedValueOnce(
+        createReplicateModelResponse({
+          first_frame: { type: "string", format: "uri", description: "First frame image" },
+          last_frame: { type: "string", format: "uri", description: "Last frame image" },
+          video: { type: "string", format: "uri", description: "Input video to process" },
+        })
+      );
+
+      const modelId = `test/frames-${testCounter}`;
+      const request = createMockSchemaRequest(modelId, "replicate");
+      const response = await GET(request, { params: Promise.resolve({ modelId }) });
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      const byName: Record<string, string> = Object.fromEntries(
+        data.inputs.map((i: { name: string; type: string }) => [i.name, i.type])
+      );
+      expect(byName.first_frame).toBe("image");
+      expect(byName.last_frame).toBe("image");
+      expect(byName.video).toBe("video");
+    });
+  });
 });

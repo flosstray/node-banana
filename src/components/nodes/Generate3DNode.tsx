@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useState, useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useState, useEffect, useMemo } from "react";
 import { Handle, Position, NodeProps, Node, useReactFlow } from "@xyflow/react";
 import { BaseNode } from "./BaseNode";
 import { ModelParameters } from "./ModelParameters";
@@ -17,6 +17,7 @@ import { SettingsTabBar } from "./SettingsTabBar";
 import { browseRegistry } from "@/utils/browseRegistry";
 import { useShowHandleLabels } from "@/hooks/useShowHandleLabels";
 import { HandleLabel } from "./HandleLabel";
+import { useErrorToast } from "@/hooks/useErrorToast";
 
 // 3D generation capabilities
 const THREE_D_CAPABILITIES: ModelCapability[] = ["text-to-3d", "image-to-3d"];
@@ -116,16 +117,8 @@ export function Generate3DNode({ id, data, selected }: NodeProps<Generate3DNodeT
     updateNodeData(id, { parametersExpanded: !isParamsExpanded });
   }, [id, isParamsExpanded, updateNodeData]);
 
-  // Track previous status to detect error transitions
-  const prevStatusRef = useRef(nodeData.status);
-
-  // Show toast when error occurs
-  useEffect(() => {
-    if (nodeData.status === "error" && prevStatusRef.current !== "error" && nodeData.error) {
-      useToast.getState().show("3D generation failed", "error", true, nodeData.error);
-    }
-    prevStatusRef.current = nodeData.status;
-  }, [nodeData.status, nodeData.error]);
+  // Show toast when generation fails
+  useErrorToast(nodeData.status, nodeData.error, "3D generation failed");
 
   const handleClear3D = useCallback(() => {
     updateNodeData(id, { output3dUrl: null, savedFilename: null, savedFilePath: null, status: "idle", error: null });

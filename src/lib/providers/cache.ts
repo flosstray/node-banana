@@ -42,6 +42,59 @@ export interface WaveSpeedApiSchema {
 const DEFAULT_TTL = 60 * 60 * 1000;
 
 /**
+ * Maximum number of keys retained per cache Map.
+ *
+ * Search-based cache keys (`provider:search:<query>`) are unbounded — every
+ * distinct debounced query fragment produces a new key — so without a cap the
+ * Maps grow monotonically in a long-running server. Maps preserve insertion
+ * order, so evicting the first key removes the oldest entry (approximate LRU).
+ */
+const MAX_CACHE_SIZE = 100;
+
+/**
+ * Maximum number of keys retained in the WaveSpeed schema cache.
+ *
+ * A single catalogue fetch bulk-inserts one entry per model, which can exceed
+ * the small search-cache cap and immediately evict entries from that same
+ * fetch. The schema cache is keyed by model id (a bounded set), so it gets a
+ * larger cap sized to hold a full catalogue.
+ */
+const MAX_SCHEMA_CACHE_SIZE = 1000;
+
+/**
+ * Sweep expired entries and enforce the size cap on a cache Map.
+ *
+ * Called on every write so the Maps cannot grow without bound. Expired entries
+ * are removed first; if still over capacity, oldest entries (by insertion
+ * order) are evicted until within the cap.
+ *
+ * @param map - Cache Map to prune
+ * @param ttl - TTL used to determine expiry
+ * @param maxSize - Maximum keys to retain (defaults to the search-cache cap)
+ */
+function pruneCache<T>(
+  map: Map<string, CacheEntry<T>>,
+  ttl: number,
+  maxSize: number = MAX_CACHE_SIZE
+): void {
+  const now = Date.now();
+
+  for (const [key, entry] of map) {
+    if (now - entry.timestamp > ttl) {
+      map.delete(key);
+    }
+  }
+
+  while (map.size > maxSize) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    map.delete(oldestKey);
+  }
+}
+
+/**
  * In-memory cache storage for models
  */
 const cache: Map<string, CacheEntry<ProviderModel[]>> = new Map();
@@ -90,6 +143,7 @@ export function setCachedModels(key: string, models: ProviderModel[]): void {
     data: models,
     timestamp: Date.now(),
   });
+  pruneCache(cache, DEFAULT_TTL);
 }
 
 /**
@@ -175,6 +229,7 @@ export function setCachedWaveSpeedSchema(
     data: schema,
     timestamp: Date.now(),
   });
+  pruneCache(wavespeedSchemaCache, DEFAULT_TTL, MAX_SCHEMA_CACHE_SIZE);
 }
 
 /**
@@ -192,6 +247,7 @@ export function setCachedWaveSpeedSchemas(
       timestamp: now,
     });
   }
+  pruneCache(wavespeedSchemaCache, DEFAULT_TTL, MAX_SCHEMA_CACHE_SIZE);
 }
 
 /**

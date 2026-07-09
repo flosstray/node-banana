@@ -11,6 +11,9 @@ import { ProviderModel, ModelCapability } from "@/lib/providers/types";
 // localStorage cache for models (persists across dev server restarts)
 const MODELS_CACHE_KEY = "node-banana-models-cache";
 const MODELS_CACHE_TTL = 48 * 60 * 60 * 1000; // 48 hours
+// Cap the number of cached entries to avoid unbounded localStorage growth.
+// Entries are pruned LRU-style (oldest timestamp first) on write.
+const MODELS_CACHE_MAX_ENTRIES = 20;
 
 interface ModelsCacheEntry {
   models: ProviderModel[];
@@ -33,12 +36,54 @@ function getCachedModels(cacheKey: string): ModelsCacheEntry | null {
 
 function setCachedModels(cacheKey: string, models: ProviderModel[], availableProviders?: string[]) {
   try {
-    const cache = JSON.parse(localStorage.getItem(MODELS_CACHE_KEY) || "{}");
-    cache[cacheKey] = { models, availableProviders, timestamp: Date.now() };
+    const cache: Record<string, ModelsCacheEntry> = JSON.parse(
+      localStorage.getItem(MODELS_CACHE_KEY) || "{}"
+    );
+    const now = Date.now();
+
+    // Prune expired entries so the cache doesn't accumulate stale data forever.
+    for (const key of Object.keys(cache)) {
+      const entry = cache[key];
+      if (!entry || now - entry.timestamp >= MODELS_CACHE_TTL) {
+        delete cache[key];
+      }
+    }
+
+    cache[cacheKey] = { models, availableProviders, timestamp: now };
+
+    // Cap total entries (LRU): drop oldest by timestamp until under the limit.
+    const keys = Object.keys(cache);
+    if (keys.length > MODELS_CACHE_MAX_ENTRIES) {
+      keys
+        .sort((a, b) => cache[a].timestamp - cache[b].timestamp)
+        .slice(0, keys.length - MODELS_CACHE_MAX_ENTRIES)
+        .forEach((key) => delete cache[key]);
+    }
+
     localStorage.setItem(MODELS_CACHE_KEY, JSON.stringify(cache));
   } catch {
     // Ignore cache errors
   }
+}
+
+// Build a short, stable hash of the configured providers so the cache key
+// changes when API keys are added/removed (otherwise the "all" view keeps
+// serving a stale list that omits a newly-configured provider).
+function getProvidersHash(providers: {
+  replicate: boolean;
+  fal: boolean;
+  kie: boolean;
+  wavespeed: boolean;
+  openai: boolean;
+}): string {
+  // Fixed order keeps the hash deterministic across renders.
+  return [
+    providers.replicate ? "r" : "",
+    providers.fal ? "f" : "",
+    providers.kie ? "k" : "",
+    providers.wavespeed ? "w" : "",
+    providers.openai ? "o" : "",
+  ].join("");
 }
 
 // Provider icons — all normalized to w-3.5 h-3.5 with viewBoxes cropped to fill consistently
@@ -73,6 +118,12 @@ const WaveSpeedIcon = () => (
     <path d="M308.946 153.758C314.185 153.758 318.268 158.321 317.516 163.506C306.856 237.02 270.334 302.155 217.471 349.386C211.398 354.812 203.458 357.586 195.315 357.586H127.562C117.863 357.586 110.001 349.724 110.001 340.025V333.552C110.001 326.82 113.882 320.731 119.792 317.505C176.087 286.779 217.883 232.832 232.32 168.537C234.216 160.09 241.509 153.758 250.167 153.758H308.946Z" />
     <path d="M183.573 153.758C188.576 153.758 192.592 157.94 192.069 162.916C187.11 210.12 160.549 250.886 122.45 275.151C116.916 278.676 110 274.489 110 267.928V171.318C110 161.62 117.862 153.758 127.56 153.758H183.573Z" />
     <path d="M414.815 153.758C425.503 153.758 433.734 163.232 431.799 173.743C420.697 234.038 398.943 290.601 368.564 341.414C362.464 351.617 351.307 357.586 339.419 357.586H274.228C266.726 357.586 262.611 348.727 267.233 342.819C306.591 292.513 334.86 233.113 348.361 168.295C350.104 159.925 357.372 153.758 365.922 153.758H414.815Z" />
+  </svg>
+);
+
+const OpenAIIcon = () => (
+  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.997-2.9 6.056 6.056 0 0 0-.747-7.073zM13.26 22.43a4.476 4.476 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.795.795 0 0 0 .392-.681v-6.737l2.02 1.168a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494zM3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.771.771 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646zM2.34 7.896a4.485 4.485 0 0 1 2.366-1.973V11.6a.766.766 0 0 0 .388.676l5.815 3.355-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.896zm16.597 3.855l-5.833-3.387L15.119 7.2a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667zm2.01-3.023l-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zm-12.64 4.135l-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08L8.704 5.46a.795.795 0 0 0-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5z" />
   </svg>
 );
 
@@ -135,7 +186,7 @@ export function ModelSearchDialog({
     trackModelUsage,
   } = useWorkflowStore();
   // Use stable selector for API keys to prevent unnecessary re-fetches
-  const { replicateApiKey, falApiKey, kieApiKey, wavespeedApiKey } = useProviderApiKeys();
+  const { replicateApiKey, falApiKey, kieApiKey, wavespeedApiKey, openaiApiKey } = useProviderApiKeys();
   const { screenToFlowPosition } = useReactFlow();
 
   // State
@@ -185,8 +236,16 @@ export function ModelSearchDialog({
     // Increment version to track this request
     const thisVersion = ++requestVersionRef.current;
 
-    // Build cache key from filters
-    const cacheKey = `${providerFilter}:${capabilityFilter}:${debouncedSearch}`;
+    // Build cache key from filters + configured providers (so the key changes
+    // when an API key is added/removed and the "all" view can't go stale).
+    const providersHash = getProvidersHash({
+      replicate: !!replicateApiKey,
+      fal: !!falApiKey,
+      kie: !!kieApiKey,
+      wavespeed: !!wavespeedApiKey,
+      openai: !!openaiApiKey,
+    });
+    const cacheKey = `${providersHash}:${providerFilter}:${capabilityFilter}:${debouncedSearch}`;
 
     // Check localStorage cache first (skip when bypassing)
     if (!bypassCache) {
@@ -241,6 +300,9 @@ export function ModelSearchDialog({
       if (wavespeedApiKey) {
         headers["X-WaveSpeed-Key"] = wavespeedApiKey;
       }
+      if (openaiApiKey) {
+        headers["X-OpenAI-API-Key"] = openaiApiKey;
+      }
 
       const response = await deduplicatedFetch(`/api/models?${params.toString()}`, {
         headers,
@@ -255,8 +317,12 @@ export function ModelSearchDialog({
 
       if (data.success && data.models) {
         setModels(data.models);
-        // Cache the successful result (including available providers)
-        setCachedModels(cacheKey, data.models, data.availableProviders);
+        // Only cache browse results (empty search), not per-keystroke search
+        // fragments — otherwise every distinct debounced string stores a full
+        // model list and the cache grows unbounded.
+        if (!debouncedSearch) {
+          setCachedModels(cacheKey, data.models, data.availableProviders);
+        }
         // Update server-reported available providers
         if (data.availableProviders) {
           setServerAvailableProviders(data.availableProviders);
@@ -278,7 +344,7 @@ export function ModelSearchDialog({
         setIsLoading(false);
       }
     }
-  }, [debouncedSearch, providerFilter, capabilityFilter, replicateApiKey, falApiKey, kieApiKey, wavespeedApiKey]);
+  }, [debouncedSearch, providerFilter, capabilityFilter, replicateApiKey, falApiKey, kieApiKey, wavespeedApiKey, openaiApiKey]);
 
   // Fetch models when filters change
   useEffect(() => {
@@ -402,6 +468,8 @@ export function ModelSearchDialog({
         return "bg-orange-500/20 text-orange-300";
       case "wavespeed":
         return "bg-purple-500/20 text-purple-300";
+      case "openai":
+        return "bg-teal-500/20 text-teal-300";
       default:
         return "bg-neutral-500/20 text-neutral-300";
     }
@@ -420,6 +488,8 @@ export function ModelSearchDialog({
         return "Kie.ai";
       case "wavespeed":
         return "WaveSpeed";
+      case "openai":
+        return "OpenAI";
       default:
         return provider;
     }
@@ -432,12 +502,13 @@ export function ModelSearchDialog({
     if (replicateApiKey) providers.add("replicate");
     if (kieApiKey) providers.add("kie");
     if (wavespeedApiKey) providers.add("wavespeed");
+    if (openaiApiKey) providers.add("openai");
     // Server-side keys (from env vars, reported by /api/models)
     for (const p of serverAvailableProviders) {
       providers.add(p as ProviderType);
     }
     return providers;
-  }, [replicateApiKey, kieApiKey, wavespeedApiKey, serverAvailableProviders]);
+  }, [replicateApiKey, kieApiKey, wavespeedApiKey, openaiApiKey, serverAvailableProviders]);
 
   // Reset provider filter if current selection becomes unavailable
   useEffect(() => {
@@ -706,6 +777,19 @@ export function ModelSearchDialog({
                   }`}
                 >
                   <WaveSpeedIcon />
+                </button>
+              )}
+              {availableProviders.has("openai") && (
+                <button
+                  onClick={() => setProviderFilter("openai")}
+                  title="OpenAI"
+                  className={`p-2 rounded transition-colors ${
+                    providerFilter === "openai"
+                      ? "bg-teal-500/20 text-teal-300"
+                      : "text-neutral-400 hover:text-teal-300 hover:bg-neutral-700"
+                  }`}
+                >
+                  <OpenAIIcon />
                 </button>
               )}
             </div>

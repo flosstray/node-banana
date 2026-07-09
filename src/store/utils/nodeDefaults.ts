@@ -14,12 +14,16 @@ import {
   GenerateAudioNodeData,
   LLMGenerateNodeData,
   SplitGridNodeData,
+  SplitGridTemplate,
   OutputNodeData,
   OutputGalleryNodeData,
   ImageCompareNodeData,
   EaseCurveNodeData,
   VideoTrimNodeData,
   VideoFrameGrabNodeData,
+  RemoveBackgroundNodeData,
+  ImageResizeNodeData,
+  GifEncoderNodeData,
   RouterNodeData,
   SwitchNodeData,
   ConditionalSwitchNodeData,
@@ -30,6 +34,7 @@ import {
   MODEL_DISPLAY_NAMES,
 } from "@/types";
 import { loadGenerateImageDefaults, loadNodeDefaults } from "./localStorage";
+import { getEasingBezier } from "@/lib/easing-presets";
 
 /**
  * Default dimensions for each node type.
@@ -48,7 +53,7 @@ export const defaultNodeDimensions: Record<NodeType, { width: number; height: nu
   generate3d: { width: 300, height: 300 },
   generateAudio: { width: 300, height: 280 },
   llmGenerate: { width: 320, height: 360 },
-  splitGrid: { width: 300, height: 320 },
+  splitGrid: { width: 300, height: 400 },
   output: { width: 320, height: 320 },
   outputGallery: { width: 320, height: 360 },
   imageCompare: { width: 400, height: 360 },
@@ -56,6 +61,9 @@ export const defaultNodeDimensions: Record<NodeType, { width: number; height: nu
   easeCurve: { width: 340, height: 280 },
   videoTrim: { width: 360, height: 360 },
   videoFrameGrab: { width: 320, height: 320 },
+  removeBackground: { width: 320, height: 320 },
+  imageResize: { width: 320, height: 360 },
+  gifEncoder: { width: 480, height: 380 },
   router: { width: 200, height: 80 },
   switch: { width: 220, height: 120 },
   conditionalSwitch: { width: 260, height: 180 },
@@ -80,6 +88,26 @@ export const GROUP_COLORS: Record<GroupColor, string> = {
 export const GROUP_COLOR_ORDER: GroupColor[] = [
   "neutral", "blue", "green", "purple", "orange", "red"
 ];
+
+/** Template-local id of the base image node present in every split-grid template */
+export const SPLIT_GRID_BASE_NODE_ID = "cell-image";
+
+/**
+ * The minimal split-grid cell template: just the base image node that
+ * receives the cell image. Lives here (not splitGridTemplate.ts) so the
+ * template utilities can depend on nodeDefaults without a cycle.
+ */
+export const createDefaultSplitGridTemplate = (): SplitGridTemplate => ({
+  baseNodeId: SPLIT_GRID_BASE_NODE_ID,
+  nodes: [
+    {
+      id: SPLIT_GRID_BASE_NODE_ID,
+      type: "imageInput",
+      position: { x: 0, y: 0 },
+    },
+  ],
+  edges: [],
+});
 
 /**
  * Creates default data for a node based on its type.
@@ -234,6 +262,11 @@ export const createDefaultNodeData = (type: NodeType): WorkflowNodeData => {
     case "splitGrid":
       return {
         sourceImage: null,
+        gridRows: 2,
+        gridCols: 3,
+        template: createDefaultSplitGridTemplate(),
+        cells: [],
+        materializedKey: null,
         targetCount: 6,
         defaultPrompt: "",
         generateSettings: {
@@ -244,8 +277,6 @@ export const createDefaultNodeData = (type: NodeType): WorkflowNodeData => {
           useImageSearch: false,
         },
         childNodeIds: [],
-        gridRows: 2,
-        gridCols: 3,
         isConfigured: false,
         status: "idle",
         error: null,
@@ -278,7 +309,7 @@ export const createDefaultNodeData = (type: NodeType): WorkflowNodeData => {
       };
     case "easeCurve":
       return {
-        bezierHandles: [0.445, 0.05, 0.55, 0.95], // easeInOutSine preset
+        bezierHandles: getEasingBezier("easeInOutSine"), // [0.37, 0, 0.63, 1] from easing-presets source of truth
         easingPreset: "easeInOutSine",
         inheritedFrom: null,
         outputDuration: 1.5,
@@ -306,6 +337,47 @@ export const createDefaultNodeData = (type: NodeType): WorkflowNodeData => {
         status: "idle",
         error: null,
       } as VideoFrameGrabNodeData;
+    case "removeBackground":
+      return {
+        model: "isnet_fp16",
+        outputImage: null,
+        status: "idle",
+        error: null,
+        progress: 0,
+      } as RemoveBackgroundNodeData;
+    case "imageResize":
+      return {
+        sourceImage: null,
+        outputImage: null,
+        mode: "exact",
+        width: 128,
+        height: 128,
+        maxEdge: 128,
+        scalePct: 100,
+        fit: "contain",
+        padColor: "#00000000",
+        format: "png",
+        quality: 0.9,
+        outputDimensions: null,
+        outputBytes: null,
+        status: "idle",
+        error: null,
+      } as ImageResizeNodeData;
+    case "gifEncoder":
+      return {
+        clipOrder: [],
+        outputGif: null,
+        fps: 8,
+        loopCount: 0,
+        colorCount: 128,
+        dither: false,
+        targetMaxBytes: 128 * 1024,
+        outputBytes: null,
+        outputDimensions: null,
+        status: "idle",
+        error: null,
+        progress: 0,
+      } as GifEncoderNodeData;
     case "router":
       return {} as RouterNodeData;
     case "switch":

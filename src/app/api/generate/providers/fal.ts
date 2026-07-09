@@ -155,6 +155,9 @@ async function getFalInputMapping(modelId: string, apiKey: string | null): Promi
 
 export const MAX_UPLOAD_SIZE = 20 * 1024 * 1024; // 20 MB
 
+/** Maximum size for downloaded result media (mirrors kie.ts / wavespeed.ts) */
+const MAX_MEDIA_SIZE = 500 * 1024 * 1024; // 500MB
+
 /**
  * Upload a base64 data URL image to fal.ai CDN storage.
  * Returns the CDN URL to use in API requests instead of inline base64.
@@ -542,9 +545,26 @@ export async function generateWithFalQueue(
       const rawContentType = mediaResponse.headers.get("content-type") || "";
       const isAudioResponse = rawContentType.startsWith("audio/") || (!rawContentType.startsWith("video/") && !rawContentType.startsWith("image/") && isAudioModel);
 
+      // Enforce max media size via content-length before buffering the body (mirrors kie.ts)
+      const mediaContentLength = parseInt(mediaResponse.headers.get("content-length") || "0", 10);
+      if (mediaContentLength > MAX_MEDIA_SIZE) {
+        const isVideoResponse = rawContentType.startsWith("video/") || (!isAudioResponse && isVideoModel);
+        if (isVideoResponse) {
+          console.log(`[API:${requestId}] SUCCESS - Returning URL for oversized video (${(mediaContentLength / (1024 * 1024)).toFixed(0)}MB)`);
+          return {
+            success: true,
+            outputs: [{ type: "video", data: "", url: mediaUrl }],
+          };
+        }
+        return { success: false, error: `Media too large: ${(mediaContentLength / (1024 * 1024)).toFixed(0)}MB > 500MB limit` };
+      }
+
       if (isAudioResponse) {
         const audioContentType = rawContentType.startsWith("audio/") ? rawContentType : "audio/mpeg";
         const audioBuffer = await mediaResponse.arrayBuffer();
+        if (audioBuffer.byteLength > MAX_MEDIA_SIZE) {
+          return { success: false, error: `Media too large: ${(audioBuffer.byteLength / (1024 * 1024)).toFixed(0)}MB > 500MB limit` };
+        }
         const audioBase64 = Buffer.from(audioBuffer).toString("base64");
         console.log(`[API:${requestId}] SUCCESS - Returning audio`);
         return {
@@ -563,6 +583,18 @@ export async function generateWithFalQueue(
       const mediaArrayBuffer = await mediaResponse.arrayBuffer();
       const mediaSizeBytes = mediaArrayBuffer.byteLength;
       const mediaSizeMB = mediaSizeBytes / (1024 * 1024);
+
+      // Post-download size guard in case content-length was missing/inaccurate (mirrors kie.ts)
+      if (mediaSizeBytes > MAX_MEDIA_SIZE) {
+        if (isVideo) {
+          console.log(`[API:${requestId}] SUCCESS - Returning URL for oversized video (${mediaSizeMB.toFixed(0)}MB)`);
+          return {
+            success: true,
+            outputs: [{ type: "video", data: "", url: mediaUrl }],
+          };
+        }
+        return { success: false, error: `Media too large: ${mediaSizeMB.toFixed(0)}MB > 500MB limit` };
+      }
 
       console.log(`[API:${requestId}] Output: ${contentType}, ${mediaSizeMB.toFixed(2)}MB`);
 

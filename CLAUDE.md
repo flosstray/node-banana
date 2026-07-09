@@ -198,7 +198,7 @@ If the model uses different endpoints than `/api/v1/jobs/createTask` and `/api/v
 - Add a detection function (e.g., `isVeoModel()`)
 - Add a model-ID-to-API-model mapping function
 - Add a custom polling function for the model's status endpoint
-- Add a branch in `generateWithKie()` for the custom request format
+- Add a branch in the Kie request-building logic (see `src/app/api/generate/providers/kie.ts`) for the custom request format
 
 ## API Routes
 

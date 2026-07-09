@@ -177,10 +177,11 @@ describe("GenerateVideoNode", () => {
         </TestWrapper>
       );
 
-      // Should have Image and Prompt labels for inputs, Video for output
+      // Inputs: Image, Video, Prompt (default handles). Output: Video.
+      // "Video" appears twice — once as the default video input, once as the output.
       expect(screen.getByText("Image")).toBeInTheDocument();
       expect(screen.getByText("Prompt")).toBeInTheDocument();
-      expect(screen.getByText("Video")).toBeInTheDocument();
+      expect(screen.getAllByText("Video").length).toBeGreaterThanOrEqual(2);
     });
   });
 

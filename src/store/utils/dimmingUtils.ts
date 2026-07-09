@@ -9,6 +9,23 @@ export function computeDimmedNodes(
   nodes: WorkflowNode[],
   edges: WorkflowEdge[]
 ): Set<string> {
+  // Pre-build adjacency structures once so the passes below avoid repeated
+  // O(E) scans (edges.filter / nodes.find) per node.
+  const edgesBySource = new Map<string, WorkflowEdge[]>();
+  const edgesByTarget = new Map<string, WorkflowEdge[]>();
+  edges.forEach(edge => {
+    const bySource = edgesBySource.get(edge.source);
+    if (bySource) bySource.push(edge);
+    else edgesBySource.set(edge.source, [edge]);
+
+    const byTarget = edgesByTarget.get(edge.target);
+    if (byTarget) byTarget.push(edge);
+    else edgesByTarget.set(edge.target, [edge]);
+  });
+
+  const nodeById = new Map<string, WorkflowNode>();
+  nodes.forEach(node => nodeById.set(node.id, node));
+
   // Step 1: Find all nodes that are downstream of disabled Switch outputs
   const potentiallyDimmed = new Set<string>();
 
@@ -21,13 +38,13 @@ export function computeDimmedNodes(
         if (sw.enabled) return; // Only process disabled switches
 
         // Find edges from this disabled output handle
-        const disabledEdges = edges.filter(
-          e => e.source === node.id && e.sourceHandle === sw.id
+        const disabledEdges = (edgesBySource.get(node.id) ?? []).filter(
+          e => e.sourceHandle === sw.id
         );
 
         // DFS traverse downstream from each disabled edge target
         disabledEdges.forEach(edge => {
-          traverseDownstream(edge.target, edges, potentiallyDimmed);
+          traverseDownstream(edge.target, edgesBySource, potentiallyDimmed);
         });
       });
     }
@@ -43,23 +60,23 @@ export function computeDimmedNodes(
       condData.rules.forEach(rule => {
         if (rule.isMatched) return; // Only process non-matching rules
 
-        const disabledEdges = edges.filter(
-          e => e.source === node.id && e.sourceHandle === rule.id
+        const disabledEdges = (edgesBySource.get(node.id) ?? []).filter(
+          e => e.sourceHandle === rule.id
         );
 
         disabledEdges.forEach(edge => {
-          traverseDownstream(edge.target, edges, potentiallyDimmed);
+          traverseDownstream(edge.target, edgesBySource, potentiallyDimmed);
         });
       });
 
       // Default output: dimmed when ANY rule matches (because default only active when NO rules match)
       const anyRuleMatches = condData.rules.some(r => r.isMatched);
       if (anyRuleMatches) {
-        const defaultEdges = edges.filter(
-          e => e.source === node.id && e.sourceHandle === "default"
+        const defaultEdges = (edgesBySource.get(node.id) ?? []).filter(
+          e => e.sourceHandle === "default"
         );
         defaultEdges.forEach(edge => {
-          traverseDownstream(edge.target, edges, potentiallyDimmed);
+          traverseDownstream(edge.target, edgesBySource, potentiallyDimmed);
         });
       }
     }
@@ -77,13 +94,13 @@ export function computeDimmedNodes(
   const sortedDimmed = topologicalSort(potentiallyDimmed, edges);
 
   sortedDimmed.forEach(nodeId => {
-    const incomingEdges = edges.filter(e => e.target === nodeId);
+    const incomingEdges = edgesByTarget.get(nodeId) ?? [];
 
     // Collect which handle types are blocked on this node
     // (from disabled Switch outputs, non-matching ConditionalSwitch outputs, or from transitively dimmed sources)
     const blockedTypes = new Set<string>();
     incomingEdges.forEach(edge => {
-      const sourceNode = nodes.find(n => n.id === edge.source);
+      const sourceNode = nodeById.get(edge.source);
       if (sourceNode?.type === "switch") {
         const switchData = sourceNode.data as SwitchNodeData;
         const switchEntry = switchData.switches?.find(s => s.id === edge.sourceHandle);
@@ -126,7 +143,7 @@ export function computeDimmedNodes(
       // Skip dimmed sources
       if (finalDimmed.has(edge.source)) return false;
       // Skip disabled Switch outputs
-      const sourceNode = nodes.find(n => n.id === edge.source);
+      const sourceNode = nodeById.get(edge.source);
       if (sourceNode?.type === "switch") {
         const switchData = sourceNode.data as SwitchNodeData;
         const switchEntry = switchData.switches?.find(s => s.id === edge.sourceHandle);
@@ -180,8 +197,14 @@ function topologicalSort(
     e => nodeIds.has(e.source) && nodeIds.has(e.target)
   );
 
+  // Source -> relevant edges adjacency so the Kahn loop avoids re-filtering
+  // every edge for each dequeued node (O(V*E) -> O(V+E)).
+  const relevantBySource = new Map<string, WorkflowEdge[]>();
   relevantEdges.forEach(e => {
     inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
+    const bucket = relevantBySource.get(e.source);
+    if (bucket) bucket.push(e);
+    else relevantBySource.set(e.source, [e]);
   });
 
   // Start with nodes that have no incoming edges from within the subset
@@ -191,22 +214,25 @@ function topologicalSort(
   });
 
   const sorted: string[] = [];
+  const sortedSet = new Set<string>();
   while (queue.length > 0) {
     const current = queue.shift()!;
     sorted.push(current);
+    sortedSet.add(current);
 
-    relevantEdges
-      .filter(e => e.source === current)
-      .forEach(e => {
-        const newDeg = (inDegree.get(e.target) ?? 1) - 1;
-        inDegree.set(e.target, newDeg);
-        if (newDeg === 0) queue.push(e.target);
-      });
+    (relevantBySource.get(current) ?? []).forEach(e => {
+      const newDeg = (inDegree.get(e.target) ?? 1) - 1;
+      inDegree.set(e.target, newDeg);
+      if (newDeg === 0) queue.push(e.target);
+    });
   }
 
   // Append any remaining nodes (cycles) to ensure all are processed
   nodeIds.forEach(id => {
-    if (!sorted.includes(id)) sorted.push(id);
+    if (!sortedSet.has(id)) {
+      sorted.push(id);
+      sortedSet.add(id);
+    }
   });
 
   return sorted;
@@ -218,13 +244,13 @@ function topologicalSort(
  */
 function traverseDownstream(
   nodeId: string,
-  edges: WorkflowEdge[],
+  edgesBySource: Map<string, WorkflowEdge[]>,
   visited: Set<string>
 ): void {
   if (visited.has(nodeId)) return; // Cycle detection
   visited.add(nodeId);
 
-  edges
-    .filter(e => e.source === nodeId)
-    .forEach(edge => traverseDownstream(edge.target, edges, visited));
+  (edgesBySource.get(nodeId) ?? []).forEach(edge =>
+    traverseDownstream(edge.target, edgesBySource, visited)
+  );
 }

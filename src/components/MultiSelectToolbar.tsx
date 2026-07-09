@@ -67,19 +67,20 @@ export function MultiSelectToolbar() {
 
     let currentX = sortedNodes[0].position.x;
 
-    sortedNodes.forEach((node) => {
+    const changes = sortedNodes.map((node) => {
       const nodeWidth = (node.style?.width as number) || node.measured?.width || 220;
 
-      onNodesChange([
-        {
-          type: "position",
-          id: node.id,
-          position: { x: currentX, y: alignY },
-        },
-      ]);
+      const change = {
+        type: "position" as const,
+        id: node.id,
+        position: { x: currentX, y: alignY },
+      };
 
       currentX += nodeWidth + STACK_GAP;
+      return change;
     });
+
+    onNodesChange(changes);
   };
 
   const handleStackVertically = () => {
@@ -93,19 +94,20 @@ export function MultiSelectToolbar() {
 
     let currentY = sortedNodes[0].position.y;
 
-    sortedNodes.forEach((node) => {
+    const changes = sortedNodes.map((node) => {
       const nodeHeight = (node.style?.height as number) || node.measured?.height || 200;
 
-      onNodesChange([
-        {
-          type: "position",
-          id: node.id,
-          position: { x: alignX, y: currentY },
-        },
-      ]);
+      const change = {
+        type: "position" as const,
+        id: node.id,
+        position: { x: alignX, y: currentY },
+      };
 
       currentY += nodeHeight + STACK_GAP;
+      return change;
     });
+
+    onNodesChange(changes);
   };
 
   const handleArrangeAsGrid = () => {
@@ -136,21 +138,21 @@ export function MultiSelectToolbar() {
     );
 
     // Position each node in the grid
-    sortedNodes.forEach((node, index) => {
+    const changes = sortedNodes.map((node, index) => {
       const col = index % cols;
       const row = Math.floor(index / cols);
 
-      onNodesChange([
-        {
-          type: "position",
-          id: node.id,
-          position: {
-            x: startX + col * (maxWidth + STACK_GAP),
-            y: startY + row * (maxHeight + STACK_GAP),
-          },
+      return {
+        type: "position" as const,
+        id: node.id,
+        position: {
+          x: startX + col * (maxWidth + STACK_GAP),
+          y: startY + row * (maxHeight + STACK_GAP),
         },
-      ]);
+      };
     });
+
+    onNodesChange(changes);
   };
 
   const handleCreateGroup = () => {

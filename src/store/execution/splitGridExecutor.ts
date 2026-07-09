@@ -2,14 +2,17 @@
  * SplitGrid Executor
  *
  * Unified executor for splitGrid nodes.
- * Splits an input image into grid cells and populates child imageInput nodes.
+ * Ensures the node's cell template is materialized (one node set + group per
+ * grid cell), splits the input image, and populates each cell's base image
+ * input node with its slice.
  */
 
 import type { SplitGridNodeData } from "@/types";
+import { clampGridDimension, getSplitGridCells } from "@/store/utils/splitGridTemplate";
 import type { NodeExecutionContext } from "./types";
 
 export async function executeSplitGrid(ctx: NodeExecutionContext): Promise<void> {
-  const { node, getConnectedInputs, updateNodeData } = ctx;
+  const { node, getConnectedInputs, updateNodeData, getFreshNode, materializeSplitGridCells } = ctx;
 
   const connectedInputs = getConnectedInputs(node.id);
   const sourceImage = connectedInputs.images[0] || null;
@@ -22,15 +25,9 @@ export async function executeSplitGrid(ctx: NodeExecutionContext): Promise<void>
     throw new Error("No input image connected");
   }
 
-  const nodeData = node.data as SplitGridNodeData;
-
-  if (!nodeData.isConfigured) {
-    updateNodeData(node.id, {
-      status: "error",
-      error: "Node not configured - open settings first",
-    });
-    throw new Error("Node not configured - open settings first");
-  }
+  const nodeData = (getFreshNode(node.id)?.data ?? node.data) as SplitGridNodeData;
+  const rows = clampGridDimension(nodeData.gridRows);
+  const cols = clampGridDimension(nodeData.gridCols);
 
   updateNodeData(node.id, {
     sourceImage,
@@ -39,32 +36,36 @@ export async function executeSplitGrid(ctx: NodeExecutionContext): Promise<void>
   });
 
   try {
-    const { splitWithDimensions } = await import("@/utils/gridSplitter");
-    const { images: splitImages } = await splitWithDimensions(
-      sourceImage,
-      nodeData.gridRows,
-      nodeData.gridCols
-    );
+    // Rebuild cells if rows/cols/template changed since last materialization
+    // (no-op when they still match, preserving per-cell user edits)
+    materializeSplitGridCells(node.id);
 
-    // Populate child imageInput nodes with split images
-    for (let index = 0; index < nodeData.childNodeIds.length; index++) {
-      const childSet = nodeData.childNodeIds[index];
-      if (splitImages[index]) {
+    const freshData = (getFreshNode(node.id)?.data ?? nodeData) as SplitGridNodeData;
+    const cells = getSplitGridCells(freshData);
+
+    const { splitWithDimensions } = await import("@/utils/gridSplitter");
+    const { images: splitImages } = await splitWithDimensions(sourceImage, rows, cols);
+
+    // Populate each cell's base image node with its slice
+    for (let index = 0; index < cells.length; index++) {
+      const baseImageNodeId = cells[index].baseImageNodeId;
+      if (baseImageNodeId && splitImages[index]) {
         await new Promise<void>((resolve) => {
           const img = new Image();
           img.onload = () => {
-            updateNodeData(childSet.imageInput, {
+            updateNodeData(baseImageNodeId, {
               image: splitImages[index],
               imageRef: undefined,
-              filename: `split-${Math.floor(index / nodeData.gridCols) + 1}-${(index % nodeData.gridCols) + 1}.png`,
+              filename: `split-${Math.floor(index / cols) + 1}-${(index % cols) + 1}.png`,
               dimensions: { width: img.width, height: img.height },
             });
             resolve();
           };
           img.onerror = () => {
-            console.warn(`[splitGrid] Failed to load split image ${index} for node ${childSet.imageInput}`);
-            updateNodeData(childSet.imageInput, {
+            console.warn(`[splitGrid] Failed to load split image ${index} for node ${baseImageNodeId}`);
+            updateNodeData(baseImageNodeId, {
               image: null,
+              imageRef: undefined,
               filename: null,
               dimensions: { width: 0, height: 0 },
             });

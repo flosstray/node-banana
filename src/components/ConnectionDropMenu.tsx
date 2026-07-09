@@ -6,7 +6,7 @@ import { NodeType } from "@/types";
 // Actions are special menu items that trigger behavior instead of creating a node
 export type MenuAction = "splitGridImmediate";
 
-interface MenuOption {
+export interface MenuOption {
   type: NodeType | MenuAction;
   label: string;
   icon: React.ReactNode;
@@ -80,11 +80,41 @@ const IMAGE_TARGET_OPTIONS: MenuOption[] = [
     ),
   },
   {
+    type: "removeBackground",
+    label: "Remove Background",
+    icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M21 9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7" />
+        <path d="M16 5h6" />
+        <circle cx="9" cy="9" r="2" />
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </svg>
+    ),
+  },
+  {
     type: "imageCompare",
     label: "Image Compare",
     icon: (
       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+      </svg>
+    ),
+  },
+  {
+    type: "imageResize",
+    label: "Resize Image",
+    icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+      </svg>
+    ),
+  },
+  {
+    type: "gifEncoder",
+    label: "GIF Encoder",
+    icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 4.5h16.5v15H3.75z M7 9.5v5 M11 9.5v5 M11 12h2.5 M16 9.5h2.5 M16 9.5v5 M16 12h1.5" />
       </svg>
     ),
   },
@@ -246,11 +276,41 @@ const IMAGE_SOURCE_OPTIONS: MenuOption[] = [
     ),
   },
   {
+    type: "removeBackground",
+    label: "Remove Background",
+    icon: ( 
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M21 9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7" />
+        <path d="M16 5h6" />
+        <circle cx="9" cy="9" r="2" />
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </svg>
+    ),
+  },
+  {
     type: "nanoBanana",
     label: "Generate Image",
     icon: (
       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
+      </svg>
+    ),
+  },
+  {
+    type: "imageResize",
+    label: "Resize Image",
+    icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+      </svg>
+    ),
+  },
+  {
+    type: "gifEncoder",
+    label: "GIF Encoder",
+    icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 4.5h16.5v15H3.75z M7 9.5v5 M11 9.5v5 M11 12h2.5 M16 9.5h2.5 M16 9.5v5 M16 12h1.5" />
       </svg>
     ),
   },
@@ -642,6 +702,30 @@ const THREE_D_SOURCE_OPTIONS: MenuOption[] = [
     ),
   },
 ];
+
+// Every addable node type, de-duplicated across all handle-type lists, for the
+// canvas double-click "add node" search menu (NodeSearchMenu). Reuses the icons
+// and labels defined above. Actions (e.g. splitGridImmediate) are excluded since
+// they are connection-specific behaviors, not standalone nodes.
+export const ALL_NODE_OPTIONS: MenuOption[] = (() => {
+  const lists = [
+    IMAGE_SOURCE_OPTIONS, IMAGE_TARGET_OPTIONS,
+    TEXT_SOURCE_OPTIONS, TEXT_TARGET_OPTIONS,
+    VIDEO_SOURCE_OPTIONS, VIDEO_TARGET_OPTIONS,
+    AUDIO_SOURCE_OPTIONS, AUDIO_TARGET_OPTIONS,
+    THREE_D_SOURCE_OPTIONS, THREE_D_TARGET_OPTIONS,
+  ];
+  const seen = new Set<string>();
+  const all: MenuOption[] = [];
+  for (const list of lists) {
+    for (const option of list) {
+      if (option.isAction || seen.has(option.type)) continue;
+      seen.add(option.type);
+      all.push(option);
+    }
+  }
+  return all.sort((a, b) => a.label.localeCompare(b.label));
+})();
 
 interface ConnectionDropMenuProps {
   position: { x: number; y: number };

@@ -29,13 +29,16 @@ export async function executeGenerateVideo(
     providerSettings,
     addIncurredCost,
     generationsPath,
+    getEdges,
     getNodes,
     trackSaveGeneration,
+    appendOutputGalleryVideo,
+    appendOutputGalleryImage,
   } = ctx;
 
   const { useStoredFallback = false } = options;
 
-  const { images: connectedImages, text: connectedText, audio: connectedAudio, dynamicInputs } = getConnectedInputs(node.id);
+  const { images: connectedImages, text: connectedText, audio: connectedAudio, videos: connectedVideos, dynamicInputs } = getConnectedInputs(node.id);
 
   // Get fresh node data from store
   const freshNode = getFreshNode(node.id);
@@ -50,7 +53,8 @@ export async function executeGenerateVideo(
     text = connectedText ?? nodeData.inputPrompt;
     const hasPrompt = text || dynamicInputs.prompt || dynamicInputs.negative_prompt;
     const hasAudio = connectedAudio.length > 0;
-    if (!hasPrompt && images.length === 0 && !hasAudio) {
+    const hasVideo = connectedVideos.length > 0;
+    if (!hasPrompt && images.length === 0 && !hasAudio && !hasVideo) {
       updateNodeData(node.id, {
         status: "error",
         error: "Missing required inputs",
@@ -62,7 +66,8 @@ export async function executeGenerateVideo(
     text = connectedText;
     const hasPrompt = text || dynamicInputs.prompt || dynamicInputs.negative_prompt;
     const hasAudio = connectedAudio.length > 0;
-    if (!hasPrompt && images.length === 0 && !hasAudio) {
+    const hasVideo = connectedVideos.length > 0;
+    if (!hasPrompt && images.length === 0 && !hasAudio && !hasVideo) {
       updateNodeData(node.id, {
         status: "error",
         error: "Missing required inputs",
@@ -170,6 +175,26 @@ export async function executeGenerateVideo(
           videoHistory: updatedHistory,
           selectedVideoHistoryIndex: 0,
         });
+
+        // Push this result to downstream outputGallery nodes so a batch run
+        // collects every item, not just the final one (mirrors the image path).
+        // executeOutputGallery de-dupes, so the final item is not double-added.
+        if (outputContent) {
+          const currentEdges = getEdges();
+          const currentNodes = getNodes();
+          currentEdges
+            .filter((e) => e.source === node.id)
+            .forEach((e) => {
+              const target = currentNodes.find((n) => n.id === e.target);
+              if (target?.type === "outputGallery") {
+                if (videoData) {
+                  appendOutputGalleryVideo(target.id, outputContent);
+                } else {
+                  appendOutputGalleryImage(target.id, outputContent);
+                }
+              }
+            });
+        }
 
         // Track cost
         if (modelToUse.provider === "fal" && modelToUse.pricing) {

@@ -27,7 +27,7 @@ import { ProviderType } from "@/types";
 import { ModelParameter, ModelInput } from "@/lib/providers/types";
 import {
   getCachedWaveSpeedSchema,
-  setCachedWaveSpeedSchema,
+  setCachedWaveSpeedSchemas,
   WaveSpeedApiSchema,
 } from "@/lib/providers/cache";
 
@@ -61,6 +61,21 @@ const AUDIO_INPUT_PATTERNS = [
   "audio_input",
   "audio_file",
   "audio",
+];
+
+// Video input property patterns. Deliberately excludes first_frame/last_frame,
+// which are still images and handled by IMAGE_INPUT_PATTERNS.
+const VIDEO_INPUT_PATTERNS = [
+  "video_url",
+  "video_urls",
+  "video",
+  "videos",
+  "input_video",
+  "source_video",
+  "init_video",
+  "reference_video",
+  "driving_video",
+  "control_video",
 ];
 
 // Text input properties
@@ -236,6 +251,46 @@ function isAudioInput(name: string, prop: Record<string, unknown>, schemaCompone
 
   // Check name patterns
   return name.endsWith("_audio") || name.startsWith("audio_");
+}
+
+/**
+ * Check if property is a video input based on schema type and name.
+ *
+ * Video inputs are strings (URLs or base64) or arrays of strings, like images
+ * and audio. Checked BEFORE isImageInput so video params (e.g. video_url) are
+ * not swallowed by the permissive image URL/uri heuristics.
+ */
+function isVideoInput(name: string, prop: Record<string, unknown>, schemaComponents?: Record<string, unknown>): boolean {
+  const resolved = resolvePropertyType(prop, schemaComponents);
+  const propType = resolved.type;
+  if (propType !== "string" && propType !== "array") {
+    return false;
+  }
+
+  // For arrays, check if items are strings
+  if (propType === "array") {
+    const items = prop.items as Record<string, unknown> | undefined;
+    if (items && items.type && items.type !== "string") {
+      return false;
+    }
+  }
+
+  // Check explicit patterns
+  if (VIDEO_INPUT_PATTERNS.includes(name)) {
+    return true;
+  }
+
+  // Check description for video-related keywords
+  const description = (prop.description as string || "").toLowerCase();
+  if (description.includes("video url") ||
+      description.includes("video file") ||
+      description.includes("url of the video") ||
+      description.includes("input video")) {
+    return true;
+  }
+
+  // Check name patterns
+  return name.endsWith("_video") || name.startsWith("video_");
 }
 
 /**
@@ -588,6 +643,21 @@ function extractParametersFromSchema(
       continue;
     }
 
+    // Video is checked before image: image detection is permissive (URL/uri
+    // description heuristics) and would otherwise swallow video_url-style params.
+    if (isVideoInput(name, prop, schemaComponents)) {
+      const resolvedType = resolvePropertyType(prop, schemaComponents).type;
+      inputs.push({
+        name,
+        type: "video",
+        required: required.includes(name),
+        label: toLabel(name),
+        description: prop.description as string | undefined,
+        isArray: resolvedType === "array",
+      });
+      continue;
+    }
+
     if (isImageInput(name, prop, schemaComponents)) {
       const resolvedType = resolvePropertyType(prop, schemaComponents).type;
       inputs.push({
@@ -629,12 +699,12 @@ function extractParametersFromSchema(
     return a.name.localeCompare(b.name);
   });
 
-  // Sort inputs: required first, then by type (image, audio, text), then alphabetically
-  const inputTypeOrder: Record<string, number> = { image: 0, audio: 1, text: 2 };
+  // Sort inputs: required first, then by type (image, video, audio, text), then alphabetically
+  const inputTypeOrder: Record<string, number> = { image: 0, video: 1, audio: 2, text: 3 };
   inputs.sort((a, b) => {
     if (a.required !== b.required) return a.required ? -1 : 1;
-    const aOrder = inputTypeOrder[a.type] ?? 3;
-    const bOrder = inputTypeOrder[b.type] ?? 3;
+    const aOrder = inputTypeOrder[a.type] ?? 4;
+    const bOrder = inputTypeOrder[b.type] ?? 4;
     if (aOrder !== bOrder) return aOrder - bOrder;
     return a.name.localeCompare(b.name);
   });
@@ -1188,6 +1258,28 @@ function getGeminiVideoSchema(modelId: string): ExtractedSchema | null {
  * Get schema for Gemini image models (native image generation via Gemini API)
  * Returns null if the model is not a Gemini image model.
  */
+/**
+ * Get hardcoded schema for OpenAI image models.
+ * OpenAI doesn't expose a schema discovery API for image generation models.
+ */
+function getOpenAiSchema(modelId: string): ExtractedSchema {
+  const parameters: ModelParameter[] = [
+    { name: "size", type: "string", description: "Output image size", enum: ["1024x1024", "1024x1536", "1536x1024", "auto"], default: "auto" },
+    { name: "quality", type: "string", description: "Output quality level", enum: ["low", "medium", "high", "auto"], default: "auto" },
+    { name: "background", type: "string", description: "Background type for generated image", enum: ["transparent", "opaque", "auto"], default: "auto" },
+  ];
+  const inputs: ModelInput[] = [
+    { name: "prompt", type: "text", required: true, label: "Prompt" },
+    { name: "image", type: "image", required: false, label: "Image", isArray: true },
+  ];
+  const schemas: Record<string, ExtractedSchema> = {
+    "gpt-image-2": { parameters, inputs },
+    "gpt-image-1": { parameters, inputs },
+  };
+
+  return schemas[modelId] || { parameters: [], inputs: [] };
+}
+
 function getGeminiImageSchema(modelId: string): ExtractedSchema | null {
   const baseAspectRatios = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
   const extendedAspectRatios = ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"];
@@ -1394,16 +1486,28 @@ async function fetchWaveSpeedSchema(
         const data = await response.json();
         const models = data.models || data.data || data.results || [];
 
-        // Find the model by ID
+        // Bulk-cache every schema from the fetched catalogue so sibling
+        // model requests don't re-download the entire payload.
+        const schemaMap = new Map<string, WaveSpeedApiSchema>();
+        for (const m of models as Record<string, unknown>[]) {
+          const id = (m.model_id || m.id || m.modelId || m.name) as
+            | string
+            | undefined;
+          if (id && m.api_schema) {
+            schemaMap.set(id, m.api_schema as WaveSpeedApiSchema);
+          }
+        }
+        if (schemaMap.size > 0) {
+          setCachedWaveSpeedSchemas(schemaMap);
+        }
+
+        // Find the requested model by ID
         const model = models.find((m: Record<string, unknown>) => {
           const id = m.model_id || m.id || m.modelId || m.name;
           return id === modelId;
         });
 
         if (model?.api_schema) {
-          // Cache the schema for future use
-          setCachedWaveSpeedSchema(modelId, model.api_schema as WaveSpeedApiSchema);
-
           const result = extractWaveSpeedSchema(model.api_schema as WaveSpeedApiSchema, modelId);
           if (result.parameters.length > 0 || result.inputs.length > 0) {
             console.log(`[WaveSpeed Schema] Found dynamic schema with ${result.parameters.length} params, ${result.inputs.length} inputs`);
@@ -1460,11 +1564,11 @@ export async function GET(
   const decodedModelId = decodeURIComponent(modelId);
   const provider = request.nextUrl.searchParams.get("provider") as ProviderType | null;
 
-  if (!provider || (provider !== "replicate" && provider !== "fal" && provider !== "kie" && provider !== "wavespeed" && provider !== "gemini")) {
+  if (!provider || (provider !== "replicate" && provider !== "fal" && provider !== "kie" && provider !== "wavespeed" && provider !== "gemini" && provider !== "openai")) {
     return NextResponse.json<SchemaErrorResponse>(
       {
         success: false,
-        error: "Invalid or missing provider. Use ?provider=replicate, ?provider=fal, ?provider=kie, ?provider=wavespeed, or ?provider=gemini",
+        error: "Invalid or missing provider. Use ?provider=replicate, ?provider=fal, ?provider=kie, ?provider=wavespeed, ?provider=openai, or ?provider=gemini",
       },
       { status: 400 }
     );
@@ -1516,6 +1620,9 @@ export async function GET(
       // WaveSpeed uses dynamic schemas from API, with static fallback
       const apiKey = request.headers.get("X-WaveSpeed-Key") || process.env.WAVESPEED_API_KEY || null;
       result = await fetchWaveSpeedSchema(decodedModelId, apiKey);
+    } else if (provider === "openai") {
+      // OpenAI uses hardcoded schemas (no schema discovery API for image models)
+      result = getOpenAiSchema(decodedModelId);
     } else {
       // User-provided key takes precedence over env variable
       const apiKey = request.headers.get("X-Fal-Key") || process.env.FAL_API_KEY || null;

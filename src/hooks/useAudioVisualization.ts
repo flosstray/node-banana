@@ -7,7 +7,36 @@ export interface WaveformData {
   peaks: number[];
 }
 
-const waveformCache = new Map<string, WaveformData>();
+// Only the lightweight, render-relevant fields are cached. The full decoded PCM
+// (channelData ~21MB/min of stereo audio) is intentionally NOT retained here — no
+// consumer reads it, only `peaks` (256 numbers) is used for rendering.
+type CachedWaveform = Pick<WaveformData, 'peaks' | 'sampleRate' | 'duration'>;
+
+// Cap the cache and evict the least-recently-used entry so long sessions with
+// many audio nodes don't grow the Map without bound.
+const MAX_CACHE_ENTRIES = 30;
+const waveformCache = new Map<string, CachedWaveform>();
+
+const readWaveformCache = (key: string): CachedWaveform | undefined => {
+  const cached = waveformCache.get(key);
+  if (cached) {
+    // Refresh LRU recency: re-inserting moves the key to the end.
+    waveformCache.delete(key);
+    waveformCache.set(key, cached);
+  }
+  return cached;
+};
+
+const writeWaveformCache = (key: string, value: CachedWaveform) => {
+  waveformCache.delete(key);
+  waveformCache.set(key, value);
+  while (waveformCache.size > MAX_CACHE_ENTRIES) {
+    const oldest = waveformCache.keys().next().value;
+    if (oldest === undefined) break;
+    waveformCache.delete(oldest);
+  }
+};
+
 const blobKeyStore = new WeakMap<Blob, string>();
 let blobKeyCounter = 0;
 let sharedAudioContext: AudioContext | null = null;
@@ -62,11 +91,16 @@ export function useAudioVisualization(audioFile: File | Blob | null) {
     }
 
     const cacheKey = getBlobCacheKey(audioFile);
-    if (cacheKey && waveformCache.has(cacheKey)) {
-      setWaveformData(waveformCache.get(cacheKey)!);
-      setIsLoading(false);
-      setError(null);
-      return;
+    if (cacheKey) {
+      const cached = readWaveformCache(cacheKey);
+      if (cached) {
+        // channelData is intentionally not cached; consumers only read peaks/
+        // duration/sampleRate. Reconstruct with an empty channelData array.
+        setWaveformData({ ...cached, channelData: [] });
+        setIsLoading(false);
+        setError(null);
+        return;
+      }
     }
 
     let isCancelled = false;
@@ -94,7 +128,12 @@ export function useAudioVisualization(audioFile: File | Blob | null) {
         };
 
         if (cacheKey) {
-          waveformCache.set(cacheKey, nextWaveform);
+          // Cache only the lightweight fields; drop the full PCM channelData.
+          writeWaveformCache(cacheKey, {
+            peaks,
+            sampleRate: audioBuffer.sampleRate,
+            duration: audioBuffer.duration,
+          });
         }
 
         if (!isCancelled) {

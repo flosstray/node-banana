@@ -111,6 +111,150 @@ export function chunk<T>(array: T[], size: number): T[][] {
 }
 
 /**
+ * Dependency-aware concurrent scheduler for level-grouped nodes.
+ *
+ * Replaces the old level-barrier + fixed-chunk scheduling. A node starts as soon
+ * as its direct upstreams (within the run set) have finished AND a concurrency
+ * slot is free — so independent branches no longer wait on a whole prior level,
+ * and a free slot immediately picks up the next ready node instead of waiting for
+ * the slowest node in a fixed batch. Data-flow correctness is preserved because
+ * readiness is gated on each node's actual upstream edges.
+ *
+ * Semantics preserved from the previous implementation:
+ * - runs the nodes in `levels` from `startLevel` onward (a subset partition is fine)
+ * - cooperative stop: stops launching new nodes when `signal` aborts or `isRunning()`
+ *   becomes false (e.g. a pause edge), letting in-flight nodes settle
+ * - fail-fast: the first non-abort error aborts the run and rejects this call
+ * - a run-set that (anomalously) contains a dependency cycle still executes every
+ *   node, matching the old "every node in every level runs" behavior
+ */
+export interface ConcurrentScheduleContext {
+  levels: LevelGroup[];
+  startLevel: number;
+  /** Edges used to derive readiness; caller passes the already-filtered set (e.g. forward-only). */
+  edges: Array<{ source: string; target: string }>;
+  maxConcurrent: number;
+  signal: AbortSignal;
+  isRunning: () => boolean;
+  getNode: (id: string) => WorkflowNode | undefined;
+  setCurrentNodeIds: (ids: string[]) => void;
+  runNode: (node: WorkflowNode, signal: AbortSignal) => Promise<void>;
+  onNodeError?: (node: WorkflowNode, error: unknown) => void;
+  abort: () => void;
+}
+
+export async function runNodesWithConcurrency(
+  ctx: ConcurrentScheduleContext
+): Promise<void> {
+  const {
+    levels, startLevel, edges, maxConcurrent, signal,
+    isRunning, getNode, setCurrentNodeIds, runNode, onNodeError, abort,
+  } = ctx;
+
+  // Flatten the run set in level order (dedup keeps first occurrence).
+  const order: string[] = [];
+  const runSet = new Set<string>();
+  for (let i = Math.max(0, startLevel); i < levels.length; i++) {
+    for (const id of levels[i].nodeIds) {
+      if (!runSet.has(id)) { runSet.add(id); order.push(id); }
+    }
+  }
+  if (order.length === 0) return;
+
+  const orderIndex = new Map<string, number>();
+  order.forEach((id, i) => orderIndex.set(id, i));
+
+  // In-degree + dependents restricted to the run set.
+  const indeg = new Map<string, number>();
+  const dependents = new Map<string, string[]>();
+  for (const id of order) { indeg.set(id, 0); dependents.set(id, []); }
+  for (const e of edges) {
+    if (e.source !== e.target && runSet.has(e.source) && runSet.has(e.target)) {
+      indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1);
+      dependents.get(e.source)!.push(e.target);
+    }
+  }
+
+  const ready: string[] = order.filter((id) => (indeg.get(id) ?? 0) === 0);
+  const running = new Set<string>();
+  const completed = new Set<string>();
+  const inFlight = new Set<Promise<void>>();
+  let firstError: unknown = null;
+
+  const stopRequested = () => signal.aborted || !isRunning() || firstError !== null;
+
+  const releaseDependents = (id: string) => {
+    for (const t of dependents.get(id) ?? []) {
+      const d = (indeg.get(t) ?? 1) - 1;
+      indeg.set(t, d);
+      if (d === 0) ready.push(t);
+    }
+  };
+
+  const launch = (id: string): Promise<void> => {
+    running.add(id);
+    setCurrentNodeIds([...running]);
+    const node = getNode(id);
+    if (!node) {
+      // Node was deleted mid-run: treat as a completed no-op and release dependents.
+      running.delete(id);
+      completed.add(id);
+      releaseDependents(id);
+      setCurrentNodeIds([...running]);
+      return Promise.resolve();
+    }
+    return runNode(node, signal).then(
+      () => {
+        running.delete(id);
+        completed.add(id);
+        releaseDependents(id);
+        setCurrentNodeIds([...running]);
+      },
+      (err) => {
+        running.delete(id);
+        completed.add(id);
+        setCurrentNodeIds([...running]);
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          if (firstError === null) firstError = err;
+          onNodeError?.(node, err);
+          abort();
+        }
+      }
+    );
+  };
+
+  while (true) {
+    while (!stopRequested() && running.size < maxConcurrent && ready.length > 0) {
+      ready.sort((a, b) => (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0));
+      const id = ready.shift()!;
+      if (completed.has(id) || running.has(id)) continue;
+      const tracked = launch(id).finally(() => { inFlight.delete(tracked); });
+      inFlight.add(tracked);
+    }
+
+    if (inFlight.size === 0) {
+      // Nothing in flight. If un-run nodes remain and we weren't asked to stop,
+      // flush them (guards against a dependency cycle stranding nodes).
+      if (!stopRequested() && completed.size < order.length) {
+        for (const id of order) {
+          if (!completed.has(id) && !running.has(id) && !ready.includes(id)) ready.push(id);
+        }
+        if (ready.length > 0) continue;
+      }
+      break;
+    }
+
+    await Promise.race(inFlight);
+    if (stopRequested()) {
+      await Promise.allSettled(inFlight);
+      break;
+    }
+  }
+
+  if (firstError !== null) throw firstError;
+}
+
+/**
  * Revoke a blob URL if the value is one, to free the underlying memory.
  */
 export function revokeBlobUrl(url: string | null | undefined): void {

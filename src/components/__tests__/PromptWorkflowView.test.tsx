@@ -233,6 +233,7 @@ describe("PromptWorkflowView", () => {
             description: "Create a product shot workflow",
             contentLevel: "full",
           }),
+          signal: expect.any(AbortSignal),
         });
       });
     });

@@ -41,6 +41,7 @@ import {
 // API base URLs
 const REPLICATE_API_BASE = "https://api.replicate.com/v1";
 const FAL_API_BASE = "https://api.fal.ai/v1";
+
 const WAVESPEED_API_BASE = "https://api.wavespeed.ai/api/v3";
 
 // Categories we care about for image/video/3D/audio generation (fal.ai)
@@ -571,6 +572,32 @@ const GEMINI_VIDEO_MODELS: ProviderModel[] = [
   },
 ];
 
+// OpenAI image models (hardcoded - no public image model discovery API)
+// NOTE: `pricing.amount` is a flat per-run ESTIMATE. OpenAI image pricing varies
+// by size and quality; cost tracking treats this as an approximation.
+const OPENAI_IMAGE_MODELS: ProviderModel[] = [
+  {
+    id: "gpt-image-2",
+    name: "GPT Image 2",
+    description: "OpenAI's state-of-the-art image generation model (gpt-image-2). Best-in-class text rendering, photorealism, and precise editing. Supports text-to-image and image-to-image.",
+    provider: "openai",
+    capabilities: ["text-to-image", "image-to-image"],
+    coverImage: undefined,
+    pricing: { type: "per-run", amount: 0.05, currency: "USD" },
+    pageUrl: "https://platform.openai.com/docs/guides/images",
+  },
+  {
+    id: "gpt-image-1",
+    name: "GPT Image 1",
+    description: "OpenAI's gpt-image-1 model for high-quality image generation. Supports text-to-image and image-to-image with size, quality, and background controls.",
+    provider: "openai",
+    capabilities: ["text-to-image", "image-to-image"],
+    coverImage: undefined,
+    pricing: { type: "per-run", amount: 0.05, currency: "USD" },
+    pageUrl: "https://platform.openai.com/docs/guides/images",
+  },
+];
+
 // WaveSpeed models are now fetched dynamically from https://api.wavespeed.ai/api/v3/models
 
 // ============ Replicate Types ============
@@ -704,6 +731,19 @@ function inferReplicateCapabilities(model: ReplicateModel): ModelCapability[] {
     return capabilities;
   }
 
+  // Video-processing models (upscalers, restorers, frame interpolators) often
+  // don't say "video" in their name — gate them on a processing verb paired with
+  // a video signal so they still land under the Video node instead of Image.
+  const hasVideoProcessingSignal =
+    (searchText.includes("upscale") ||
+      searchText.includes("restore") ||
+      searchText.includes("interpolat")) &&
+    (searchText.includes("video") ||
+      searchText.includes("clip") ||
+      searchText.includes("footage") ||
+      searchText.includes("fps") ||
+      searchText.includes("frames"));
+
   // Check for video-related keywords
   const isVideoModel =
     searchText.includes("video") ||
@@ -711,14 +751,17 @@ function inferReplicateCapabilities(model: ReplicateModel): ModelCapability[] {
     searchText.includes("motion") ||
     searchText.includes("luma") ||
     searchText.includes("kling") ||
-    searchText.includes("minimax");
+    searchText.includes("minimax") ||
+    hasVideoProcessingSignal;
 
   if (isVideoModel) {
-    // Video model - determine video capability type
+    // Video model - determine video capability type. Processing models consume a
+    // media (video/frame) input, so treat them as image-to-video rather than text.
     if (
       searchText.includes("img2vid") ||
       searchText.includes("image-to-video") ||
-      searchText.includes("i2v")
+      searchText.includes("i2v") ||
+      hasVideoProcessingSignal
     ) {
       capabilities.push("image-to-video");
     } else {
@@ -785,6 +828,110 @@ async function fetchReplicateModels(apiKey: string): Promise<ProviderModel[]> {
   }
 
   return allModels;
+}
+
+/**
+ * Fetch a single Replicate model by its full "owner/name" id.
+ *
+ * The bulk listing in fetchReplicateModels only covers the first ~15 pages of
+ * Replicate's catalogue, so most models (e.g. topazlabs/video-upscale) never
+ * appear there. This direct lookup is the fallback used when a user searches by
+ * an exact model id. Returns null on a malformed id or any non-OK response
+ * (including 404) so a typo never fails the whole /api/models request.
+ */
+async function fetchReplicateModelById(
+  apiKey: string,
+  modelId: string
+): Promise<ProviderModel | null> {
+  const parts = modelId.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return null;
+  }
+  const [owner, name] = parts;
+
+  try {
+    const response = await fetch(`${REPLICATE_API_BASE}/models/${owner}/${name}`, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const model: ReplicateModel = await response.json();
+    return mapReplicateModel(model);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract valid Replicate models from a search response. Handles both the
+ * /v1/search shape ({ results: [{ model: {...} }] }) and a direct-model shape
+ * ({ results: [{...model}] }), skipping non-model results (collections, docs).
+ */
+function extractReplicateSearchModels(data: unknown): ProviderModel[] {
+  const results = (data as { results?: unknown[] })?.results;
+  if (!Array.isArray(results)) return [];
+
+  const models: ProviderModel[] = [];
+  for (const result of results) {
+    const candidate = ((result as { model?: unknown })?.model ?? result) as {
+      owner?: unknown;
+      name?: unknown;
+    };
+    if (candidate && typeof candidate.owner === "string" && typeof candidate.name === "string") {
+      models.push(mapReplicateModel(candidate as ReplicateModel));
+    }
+  }
+  return models;
+}
+
+/**
+ * Search Replicate's full catalogue server-side for a text query.
+ *
+ * The bulk listing only covers the first ~15 pages, so a fragment search like
+ * "topaz" can't find models outside that window. This hits Replicate's search
+ * so any public model is discoverable by name. Tries the dedicated /v1/search
+ * endpoint first, then falls back to QUERY /v1/models. Always returns an array
+ * (never throws) so a flaky/again-unreliable search can only ADD results, never
+ * break the request — list results and the by-id fallback still apply.
+ */
+async function searchReplicateModels(apiKey: string, query: string): Promise<ProviderModel[]> {
+  // 1) GET /v1/search?query=... (searches models, collections, docs)
+  try {
+    const response = await fetch(
+      `${REPLICATE_API_BASE}/search?query=${encodeURIComponent(query)}`,
+      { headers: { Authorization: `Bearer ${apiKey}` } }
+    );
+    if (response.ok) {
+      const models = extractReplicateSearchModels(await response.json());
+      if (models.length > 0) return models;
+    }
+  } catch {
+    // fall through to the models search
+  }
+
+  // 2) QUERY /v1/models (dedicated model search; plain-text body)
+  try {
+    const response = await fetch(`${REPLICATE_API_BASE}/models`, {
+      method: "QUERY",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "text/plain",
+      },
+      body: query,
+    });
+    if (response.ok) {
+      return extractReplicateSearchModels(await response.json());
+    }
+  } catch {
+    // ignore — search is best-effort
+  }
+
+  return [];
 }
 
 /**
@@ -1098,6 +1245,7 @@ export async function GET(
   const falKey = request.headers.get("X-Fal-Key") || process.env.FAL_API_KEY || null;
   const kieKey = request.headers.get("X-Kie-Key") || process.env.KIE_API_KEY || null;
   const wavespeedKey = request.headers.get("X-WaveSpeed-Key") || process.env.WAVESPEED_API_KEY || null;
+  const openaiKey = request.headers.get("X-OpenAI-API-Key") || process.env.OPENAI_API_KEY || null;
 
   // Build list of all available providers (have keys from env or client headers)
   const availableProviders: string[] = ["gemini"]; // Gemini always available
@@ -1105,11 +1253,13 @@ export async function GET(
   if (replicateKey) availableProviders.push("replicate");
   if (kieKey) availableProviders.push("kie");
   if (wavespeedKey) availableProviders.push("wavespeed");
+  if (openaiKey) availableProviders.push("openai");
 
-  // Determine which providers to fetch from (excluding gemini/kie - handled separately as hardcoded)
+  // Determine which providers to fetch from (gemini/kie/openai handled separately as hardcoded)
   const providersToFetch: ProviderType[] = [];
   let includeGemini = false;
   let includeKie = false;
+  let includeOpenai = false;
 
   if (providerFilter) {
     if (providerFilter === "gemini") {
@@ -1143,6 +1293,19 @@ export async function GET(
           { status: 400 }
         );
       }
+    } else if (providerFilter === "openai") {
+      // Only OpenAI requested - no external API calls needed (hardcoded models)
+      if (openaiKey) {
+        includeOpenai = true;
+      } else {
+        return NextResponse.json<ModelsErrorResponse>(
+          {
+            success: false,
+            error: "OpenAI API key required. Add OPENAI_API_KEY to .env.local or configure in Settings.",
+          },
+          { status: 400 }
+        );
+      }
     } else if (providerFilter === "replicate" && replicateKey) {
       providersToFetch.push("replicate");
     } else if (providerFilter === "fal" && falKey) {
@@ -1152,6 +1315,7 @@ export async function GET(
     // Include all providers that have keys configured
     includeGemini = true; // Gemini always available
     includeKie = kieKey ? true : false; // Kie only if API key is configured
+    includeOpenai = openaiKey ? true : false; // OpenAI only if API key is configured
     if (wavespeedKey) {
       providersToFetch.push("wavespeed"); // WaveSpeed if key is configured
     }
@@ -1163,13 +1327,13 @@ export async function GET(
     }
   }
 
-  // Gemini and Kie are always available (with key for Kie), so we don't fail if no external providers
-  if (providersToFetch.length === 0 && !includeGemini && !includeKie) {
+  // Gemini/Kie/OpenAI are handled as hardcoded, so we don't fail if no external providers
+  if (providersToFetch.length === 0 && !includeGemini && !includeKie && !includeOpenai) {
     return NextResponse.json<ModelsErrorResponse>(
       {
         success: false,
         error:
-          "No providers available. Add REPLICATE_API_KEY, FAL_API_KEY, KIE_API_KEY, or WAVESPEED_API_KEY to .env.local or configure in Settings.",
+          "No providers available. Add REPLICATE_API_KEY, FAL_API_KEY, KIE_API_KEY, WAVESPEED_API_KEY, or OPENAI_API_KEY to .env.local or configure in Settings.",
       },
       { status: 400 }
     );
@@ -1208,6 +1372,22 @@ export async function GET(
     providerResults["kie"] = {
       success: true,
       count: kieModels.length,
+      cached: true, // Hardcoded models are effectively "cached"
+    };
+    anyFromCache = true;
+  }
+
+  // Add OpenAI models if included (hardcoded, no API call needed)
+  if (includeOpenai) {
+    // Filter by search query if provided
+    let openaiModels = OPENAI_IMAGE_MODELS;
+    if (searchQuery) {
+      openaiModels = filterModelsBySearch(openaiModels, searchQuery);
+    }
+    allModels.push(...openaiModels);
+    providerResults["openai"] = {
+      success: true,
+      count: openaiModels.length,
       cached: true, // Hardcoded models are effectively "cached"
     };
     anyFromCache = true;
@@ -1279,6 +1459,57 @@ export async function GET(
           error: errorMessage,
         };
         continue;
+      }
+    }
+
+    // Replicate search: the cached catalogue only covers ~15 pages, so a
+    // fragment search (e.g. "topaz") can't find models outside that window.
+    // Always run the comprehensive search for a query so models beyond the
+    // cached pages are discoverable even when the local list already has a few
+    // matches; results are cached per query so repeat searches stay fast.
+    if (provider === "replicate" && searchQuery) {
+      const searchCacheKey = getCacheKey(provider, searchQuery);
+      let searchModels = refresh ? null : getCachedModels(searchCacheKey);
+      if (!searchModels) {
+        searchModels = await searchReplicateModels(replicateKey!, searchQuery);
+        setCachedModels(searchCacheKey, searchModels);
+      }
+      if (searchModels.length > 0) {
+        const seen = new Set(models.map((m) => m.id.toLowerCase()));
+        const fresh: ProviderModel[] = [];
+        for (const m of searchModels) {
+          const key = m.id.toLowerCase();
+          if (!seen.has(key)) {
+            seen.add(key);
+            fresh.push(m);
+          }
+        }
+        if (fresh.length > 0) {
+          models = [...models, ...fresh];
+        }
+      }
+    }
+
+    // Replicate fallback: if the user searched by an exact "owner/name" id that
+    // isn't in the paginated catalogue, resolve it directly so any public model
+    // is reachable (O(1) lookup rather than unbounded extra pagination).
+    if (
+      provider === "replicate" &&
+      searchQuery &&
+      searchQuery.includes("/") &&
+      !models.some((m) => m.id.toLowerCase() === searchQuery.toLowerCase())
+    ) {
+      const byId = await fetchReplicateModelById(replicateKey!, searchQuery);
+      if (byId) {
+        models = [...models, byId];
+        // Warm the cached full list so repeat searches resolve without a refetch.
+        const cachedFull = getCachedModels(cacheKey);
+        if (
+          cachedFull &&
+          !cachedFull.some((m) => m.id.toLowerCase() === byId.id.toLowerCase())
+        ) {
+          setCachedModels(cacheKey, [...cachedFull, byId]);
+        }
       }
     }
 

@@ -258,17 +258,8 @@ export async function generateWithReplicate(
     return { success: false, error: `Invalid media URL: ${mediaUrlCheck.error}` };
   }
 
-  console.log(`[API:${requestId}] Fetching output from: ${mediaUrl.substring(0, 80)}...`);
-  const mediaResponse = await fetch(mediaUrl);
-
-  if (!mediaResponse.ok) {
-    return {
-      success: false,
-      error: `Failed to fetch output: ${mediaResponse.status}`,
-    };
-  }
-
-  // Check if this is a 3D model — return URL directly (GLB files are binary)
+  // Check if this is a 3D model — return URL directly (GLB files are binary).
+  // Short-circuit before fetching so we never download the potentially large GLB binary.
   const is3DModel = input.model.capabilities.some(c => c.includes("3d"));
   if (is3DModel) {
     console.log(`[API:${requestId}] SUCCESS - Returning 3D model URL`);
@@ -281,6 +272,16 @@ export async function generateWithReplicate(
           url: mediaUrl,
         },
       ],
+    };
+  }
+
+  console.log(`[API:${requestId}] Fetching output from: ${mediaUrl.substring(0, 80)}...`);
+  const mediaResponse = await fetch(mediaUrl);
+
+  if (!mediaResponse.ok) {
+    return {
+      success: false,
+      error: `Failed to fetch output: ${mediaResponse.status}`,
     };
   }
 

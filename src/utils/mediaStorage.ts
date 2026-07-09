@@ -557,6 +557,13 @@ async function externalizeNodeMedia(
       break;
     }
 
+    case "removeBackground": {
+      const d = data as import("@/types").RemoveBackgroundNodeData;
+      // Clear output image (derived from input image)
+      newData = { ...d, outputImage: null };
+      break;
+    }
+
     case "glbViewer": {
       const d = data as import("@/types").GLBViewerNodeData;
       // Externalize captured viewport image
@@ -1066,23 +1073,32 @@ async function hydrateNodeMedia(
         }
       }
 
-      // Filter out any empty entries that failed to hydrate, keeping refs in sync
+      // Rebuild arrays keeping refs in sync. An entry with an empty media value
+      // may simply have failed to hydrate (transient error, legacy folder layout,
+      // fs read error) even though the underlying file still exists on disk.
+      // Preserve such entries (empty media, ref intact) so a one-time load hiccup
+      // never permanently deletes gallery items; only drop true empty placeholders
+      // that carry neither media nor a ref to recover from.
       const filteredImages: string[] = [];
       const filteredImageRefs: string[] = [];
       for (let i = 0; i < images.length; i++) {
-        if (images[i] && images[i] !== "") {
-          filteredImages.push(images[i]);
-          if (d.imageRefs?.[i]) filteredImageRefs.push(d.imageRefs[i]);
-          else filteredImageRefs.push("");
+        const media = images[i];
+        const ref = d.imageRefs?.[i] || "";
+        const hasMedia = !!media && media !== "";
+        if (hasMedia || ref !== "") {
+          filteredImages.push(hasMedia ? media : "");
+          filteredImageRefs.push(ref);
         }
       }
       const filteredVideos: string[] = [];
       const filteredVideoRefs: string[] = [];
       for (let i = 0; i < videos.length; i++) {
-        if (videos[i] && videos[i] !== "") {
-          filteredVideos.push(videos[i]);
-          if (d.videoRefs?.[i]) filteredVideoRefs.push(d.videoRefs[i]);
-          else filteredVideoRefs.push("");
+        const media = videos[i];
+        const ref = d.videoRefs?.[i] || "";
+        const hasMedia = !!media && media !== "";
+        if (hasMedia || ref !== "") {
+          filteredVideos.push(hasMedia ? media : "");
+          filteredVideoRefs.push(ref);
         }
       }
       newData = {
@@ -1135,6 +1151,12 @@ async function hydrateNodeMedia(
 
     case "videoFrameGrab": {
       // videoFrameGrab content is not persisted - it's regenerated on each workflow run
+      newData = data;
+      break;
+    }
+
+    case "removeBackground": {
+      // removeBackground content is not persisted - it's regenerated on each workflow run
       newData = data;
       break;
     }

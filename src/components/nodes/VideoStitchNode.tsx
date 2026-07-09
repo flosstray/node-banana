@@ -140,13 +140,16 @@ export function VideoStitchNode({ id, data, selected }: NodeProps<VideoStitchNod
   // Extract thumbnails from connected videos
   useEffect(() => {
     let cancelled = false;
+    let activeVideo: HTMLVideoElement | null = null;
+    let activeBlobUrl: string | null = null;
 
-    const cleanupVideo = (video: HTMLVideoElement) => {
+    const cleanupVideo = (video: HTMLVideoElement, blobUrl?: string | null) => {
       video.onloadedmetadata = null;
       video.onerror = null;
       video.onseeked = null;
       video.src = "";
       video.load();
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
 
     const extractThumbnails = async () => {
@@ -168,8 +171,23 @@ export function VideoStitchNode({ id, data, selected }: NodeProps<VideoStitchNod
         }
 
         const video = document.createElement("video");
+        activeVideo = video;
+        activeBlobUrl = null;
+        // Convert data URLs to blob URLs for metadata loading efficiency
+        // (avoids re-parsing the full base64 payload into the element).
+        let blobUrl: string | null = null;
+        if (clip.videoData.startsWith("data:")) {
+          try {
+            const blob = await (await fetch(clip.videoData)).blob();
+            if (cancelled) return;
+            blobUrl = URL.createObjectURL(blob);
+            activeBlobUrl = blobUrl;
+          } catch {
+            blobUrl = null;
+          }
+        }
         try {
-          video.src = clip.videoData;
+          video.src = blobUrl ?? clip.videoData;
           video.crossOrigin = "anonymous";
           video.muted = true;
           video.preload = "metadata";
@@ -179,7 +197,7 @@ export function VideoStitchNode({ id, data, selected }: NodeProps<VideoStitchNod
             video.onerror = () => reject(new Error("Failed to load video"));
           });
 
-          if (cancelled) { cleanupVideo(video); return; }
+          if (cancelled) { cleanupVideo(video, blobUrl); return; }
 
           const seekTime = video.duration * 0.25;
           video.currentTime = seekTime;
@@ -193,7 +211,7 @@ export function VideoStitchNode({ id, data, selected }: NodeProps<VideoStitchNod
             ),
           ]);
 
-          if (cancelled) { cleanupVideo(video); return; }
+          if (cancelled) { cleanupVideo(video, blobUrl); return; }
 
           const canvas = document.createElement("canvas");
           const thumbWidth = 160;
@@ -202,7 +220,7 @@ export function VideoStitchNode({ id, data, selected }: NodeProps<VideoStitchNod
           canvas.width = thumbWidth;
           canvas.height = Math.round(thumbWidth / aspectRatio);
           const ctx = canvas.getContext("2d");
-          if (!ctx) { cleanupVideo(video); continue; }
+          if (!ctx) { cleanupVideo(video, blobUrl); continue; }
 
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
           const thumbnail = canvas.toDataURL("image/jpeg", 0.7);
@@ -212,7 +230,9 @@ export function VideoStitchNode({ id, data, selected }: NodeProps<VideoStitchNod
         } catch (error) {
           console.warn(`Failed to extract thumbnail for clip ${clip.edgeId}:`, error);
         }
-        cleanupVideo(video);
+        cleanupVideo(video, blobUrl);
+        activeVideo = null;
+        activeBlobUrl = null;
       }
 
       if (!cancelled) {
@@ -223,7 +243,14 @@ export function VideoStitchNode({ id, data, selected }: NodeProps<VideoStitchNod
     };
 
     extractThumbnails();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (activeVideo) {
+        cleanupVideo(activeVideo, activeBlobUrl);
+        activeVideo = null;
+        activeBlobUrl = null;
+      }
+    };
   }, [clipKey]); // eslint-disable-line react-hooks/exhaustive-deps — orderedClips accessed via closure, clipKey is the stable dep
 
   // Pointer-based drag reorder (HTML5 drag doesn't work inside React Flow nodes)

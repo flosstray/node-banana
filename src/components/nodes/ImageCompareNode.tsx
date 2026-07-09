@@ -48,6 +48,8 @@ export function ImageCompareNode({
         image = (sourceNode.data as any).outputImage;
       } else if (sourceNode.type === "nanoBanana") {
         image = (sourceNode.data as any).outputImage;
+      } else if (sourceNode.type === "removeBackground") {
+        image = (sourceNode.data as any).outputImage;
       }
 
       if (image) {

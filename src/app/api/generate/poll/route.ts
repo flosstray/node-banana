@@ -8,7 +8,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { GenerateResponse } from "@/types";
 import { checkKieTaskOnce, fetchKieMediaResult, isVeoModel } from "../providers/kie";
-import { buildMediaResponse } from "../route";
+import { buildMediaResponse } from "../shared";
 
 export const maxDuration = 120; // 2 min — enough for media fetch, not for polling
 export const dynamic = 'force-dynamic';

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useEffect } from "react";
 import { Handle, Position, NodeProps, Node } from "@xyflow/react";
 import { BaseNode } from "./BaseNode";
 import { useWorkflowStore } from "@/store/workflowStore";
@@ -18,8 +18,6 @@ export function EaseCurveNode({ id, data, selected }: NodeProps<EaseCurveNodeTyp
   const nodeData = data;
   const updateNodeData = useWorkflowStore((state) => state.updateNodeData);
   const isRunning = useWorkflowStore((state) => state.isRunning);
-  const edges = useWorkflowStore((state) => state.edges);
-  const removeEdge = useWorkflowStore((state) => state.removeEdge);
   const videoBlobUrl = useVideoBlobUrl(nodeData.outputVideo ?? null);
   const videoAutoplayRef = useVideoAutoplay(id, selected);
   const showLabels = useShowHandleLabels(selected);
@@ -32,18 +30,6 @@ export function EaseCurveNode({ id, data, selected }: NodeProps<EaseCurveNodeTyp
       });
     }
   }, [id, nodeData.encoderSupported, updateNodeData]);
-
-  // Check if this node has an incoming easeCurve connection (inheritance)
-  const inheritedEdge = useMemo(() => {
-    return edges.find((e) => e.target === id && e.targetHandle === "easeCurve") || null;
-  }, [edges, id]);
-
-  const handleBreakInheritance = useCallback(() => {
-    if (inheritedEdge) {
-      removeEdge(inheritedEdge.id);
-      updateNodeData(id, { inheritedFrom: null });
-    }
-  }, [inheritedEdge, removeEdge, id, updateNodeData]);
 
   // Shared handles rendered in ALL states (4 handles with labels)
   const renderHandles = () => (

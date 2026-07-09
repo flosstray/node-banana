@@ -18,15 +18,15 @@ import { browseRegistry } from "@/utils/browseRegistry";
 import { downloadMedia } from "@/utils/downloadMedia";
 import { useShowHandleLabels } from "@/hooks/useShowHandleLabels";
 import { HandleLabel } from "./HandleLabel";
+import { useLoadGenerationById } from "@/hooks/useLoadGenerationById";
+import { useGenerationCarousel } from "@/hooks/useGenerationCarousel";
 
 type GenerateAudioNodeType = Node<GenerateAudioNodeData, "generateAudio">;
 
 export function GenerateAudioNode({ id, data, selected }: NodeProps<GenerateAudioNodeType>) {
   const nodeData = data;
   const updateNodeData = useWorkflowStore((state) => state.updateNodeData);
-  const generationsPath = useWorkflowStore((state) => state.generationsPath);
   const [isBrowseDialogOpen, setIsBrowseDialogOpen] = useState(false);
-  const [isLoadingCarouselAudio, setIsLoadingCarouselAudio] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"primary" | "fallback">("primary");
 
   useEffect(() => {
@@ -127,78 +127,25 @@ export function GenerateAudioNode({ id, data, selected }: NodeProps<GenerateAudi
   }, [id, regenerateNode]);
 
   // Load audio by ID from generations folder
-  const loadAudioById = useCallback(async (audioId: string) => {
-    if (!generationsPath) {
-      console.error("Generations path not configured");
-      return null;
-    }
-
-    try {
-      const response = await fetch("/api/load-generation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          directoryPath: generationsPath,
-          imageId: audioId,
-        }),
-      });
-
-      const result = await response.json();
-      if (!result.success) {
-        console.log(`Audio not found: ${audioId}`);
-        return null;
-      }
-      return result.audio || result.image;
-    } catch (error) {
-      console.warn("Error loading audio:", error);
-      return null;
-    }
-  }, [generationsPath]);
+  const loadAudioById = useLoadGenerationById("audio", "Audio");
 
   // Carousel navigation handlers
-  const handleCarouselPrevious = useCallback(async () => {
-    const history = nodeData.audioHistory || [];
-    if (history.length === 0 || isLoadingCarouselAudio) return;
-
-    const currentIndex = nodeData.selectedAudioHistoryIndex || 0;
-    const newIndex = currentIndex === 0 ? history.length - 1 : currentIndex - 1;
-    const audioItem = history[newIndex];
-
-    setIsLoadingCarouselAudio(true);
-    const audio = await loadAudioById(audioItem.id);
-    setIsLoadingCarouselAudio(false);
-
-    if (audio) {
-      updateNodeData(id, {
-        outputAudio: audio,
-        selectedAudioHistoryIndex: newIndex,
-        status: "idle",
-        error: null,
-      });
-    }
-  }, [id, nodeData.audioHistory, nodeData.selectedAudioHistoryIndex, isLoadingCarouselAudio, loadAudioById, updateNodeData]);
-
-  const handleCarouselNext = useCallback(async () => {
-    const history = nodeData.audioHistory || [];
-    if (history.length === 0 || isLoadingCarouselAudio) return;
-
-    const currentIndex = nodeData.selectedAudioHistoryIndex || 0;
-    const newIndex = (currentIndex + 1) % history.length;
-    const audioItem = history[newIndex];
-
-    setIsLoadingCarouselAudio(true);
-    const audio = await loadAudioById(audioItem.id);
-    setIsLoadingCarouselAudio(false);
-
-    if (audio) {
-      updateNodeData(id, {
-        outputAudio: audio,
-        selectedAudioHistoryIndex: newIndex,
-        status: "idle",
-        error: null,
-      });
-    }
-  }, [id, nodeData.audioHistory, nodeData.selectedAudioHistoryIndex, isLoadingCarouselAudio, loadAudioById, updateNodeData]);
+  const {
+    isLoading: isLoadingCarouselAudio,
+    handlePrevious: handleCarouselPrevious,
+    handleNext: handleCarouselNext,
+  } = useGenerationCarousel({
+    nodeId: id,
+    history: nodeData.audioHistory,
+    currentIndex: nodeData.selectedAudioHistoryIndex,
+    loadFn: loadAudioById,
+    buildUpdate: (audio, newIndex) => ({
+      outputAudio: audio,
+      selectedAudioHistoryIndex: newIndex,
+      status: "idle",
+      error: null,
+    }),
+  });
 
   const handleBrowseModelSelect = useCallback((model: ProviderModel) => {
     const newSelectedModel: SelectedModel = {

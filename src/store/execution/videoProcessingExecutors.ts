@@ -13,7 +13,7 @@ import type { NodeExecutionContext } from "./types";
  * VideoStitch: combines multiple video clips into a single output.
  */
 export async function executeVideoStitch(ctx: NodeExecutionContext): Promise<void> {
-  const { node, getConnectedInputs, updateNodeData, getNodes } = ctx;
+  const { node, getConnectedInputs, updateNodeData, getNodes, signal } = ctx;
   const nodeData = node.data as VideoStitchNodeData;
 
   if (nodeData.encoderSupported === false) {
@@ -37,6 +37,10 @@ export async function executeVideoStitch(ctx: NodeExecutionContext): Promise<voi
         progress: 0,
       });
       throw new Error("Need at least 2 video clips to stitch");
+    }
+
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
     }
 
     const videoBlobs = await Promise.all(
@@ -75,9 +79,15 @@ export async function executeVideoStitch(ctx: NodeExecutionContext): Promise<voi
       loopedBlobs,
       audioData,
       (progress) => {
+        if (signal?.aborted) return;
         updateNodeData(node.id, { progress: progress.progress });
-      }
+      },
+      signal
     );
+
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
 
     // Revoke old blob URL before replacing
     const oldData = getNodes().find((n) => n.id === node.id)?.data as
@@ -105,6 +115,10 @@ export async function executeVideoStitch(ctx: NodeExecutionContext): Promise<voi
       error: null,
     });
   } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      updateNodeData(node.id, { status: "idle", error: null, progress: 0 });
+      throw err;
+    }
     const errorMessage = err instanceof Error ? err.message : "Stitch failed";
     updateNodeData(node.id, {
       status: "error",
@@ -119,7 +133,7 @@ export async function executeVideoStitch(ctx: NodeExecutionContext): Promise<voi
  * VideoTrim: trims a video clip to a user-defined start/end time range with audio preservation.
  */
 export async function executeVideoTrim(ctx: NodeExecutionContext): Promise<void> {
-  const { node, getConnectedInputs, updateNodeData, getNodes } = ctx;
+  const { node, getConnectedInputs, updateNodeData, getNodes, signal } = ctx;
   const nodeData = node.data as VideoTrimNodeData;
 
   if (nodeData.encoderSupported === false) {
@@ -145,6 +159,10 @@ export async function executeVideoTrim(ctx: NodeExecutionContext): Promise<void>
       throw new Error("Connect a video input to trim");
     }
 
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+
     const videoUrl = inputs.videos[0];
     const videoBlob = await fetch(videoUrl).then((r) => r.blob());
 
@@ -168,9 +186,15 @@ export async function executeVideoTrim(ctx: NodeExecutionContext): Promise<void>
       startTime,
       endTime,
       (progress) => {
+        if (signal?.aborted) return;
         updateNodeData(node.id, { progress: progress.progress });
-      }
+      },
+      signal
     );
+
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
 
     // Revoke old blob URL before replacing
     const oldData = getNodes().find((n) => n.id === node.id)?.data as
@@ -201,6 +225,10 @@ export async function executeVideoTrim(ctx: NodeExecutionContext): Promise<void>
       error: null,
     });
   } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      updateNodeData(node.id, { status: "idle", error: null, progress: 0 });
+      throw err;
+    }
     const errorMessage = err instanceof Error ? err.message : "Video trim failed";
     updateNodeData(node.id, {
       status: "error",
@@ -215,7 +243,7 @@ export async function executeVideoTrim(ctx: NodeExecutionContext): Promise<void>
  * EaseCurve: applies speed curve to a video input.
  */
 export async function executeEaseCurve(ctx: NodeExecutionContext): Promise<void> {
-  const { node, getConnectedInputs, updateNodeData, getEdges, getNodes } = ctx;
+  const { node, getConnectedInputs, updateNodeData, getEdges, getNodes, signal } = ctx;
   const nodeData = node.data as EaseCurveNodeData;
 
   if (nodeData.encoderSupported === false) {
@@ -262,6 +290,10 @@ export async function executeEaseCurve(ctx: NodeExecutionContext): Promise<void>
       throw new Error("Connect a video input to apply ease curve");
     }
 
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+
     const videoUrl = inputs.videos[0];
     const videoBlob = await fetch(videoUrl).then((r) => r.blob());
 
@@ -294,16 +326,27 @@ export async function executeEaseCurve(ctx: NodeExecutionContext): Promise<void>
       );
     }
 
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+
     const { applySpeedCurveAsync } = await import("@/hooks/useApplySpeedCurve");
     const outputBlob = await applySpeedCurveAsync(
       videoBlob,
       videoDuration,
       activeOutputDuration,
       (progress) => {
+        if (signal?.aborted) return;
         updateNodeData(node.id, { progress: progress.progress });
       },
-      easingFunction
+      easingFunction,
+      undefined, // bitrate — keep default
+      signal
     );
+
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
 
     if (!outputBlob) {
       throw new Error("Speed curve processing returned no output");
@@ -335,6 +378,10 @@ export async function executeEaseCurve(ctx: NodeExecutionContext): Promise<void>
       error: null,
     });
   } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      updateNodeData(node.id, { status: "idle", error: null, progress: 0 });
+      throw err;
+    }
     const errorMessage =
       err instanceof Error ? err.message : "Ease curve processing failed";
     updateNodeData(node.id, {

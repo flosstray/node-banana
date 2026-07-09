@@ -43,7 +43,7 @@ export interface ModelInput {
   /** Property name from schema (e.g., "image_url", "tail_image_url", "prompt") */
   name: string;
   /** Handle type for connections */
-  type: "image" | "text" | "audio";
+  type: "image" | "text" | "audio" | "video";
   /** Whether this input is required */
   required: boolean;
   /** Human-readable label for the handle */

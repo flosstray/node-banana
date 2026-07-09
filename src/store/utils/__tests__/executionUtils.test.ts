@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   groupNodesByLevel,
   chunk,
+  runNodesWithConcurrency,
   revokeBlobUrl,
   clearNodeImageRefs,
   loadConcurrencySetting,
@@ -215,5 +216,217 @@ describe("concurrency settings", () => {
   it("should save setting", () => {
     saveConcurrencySetting(7);
     expect(mockStorage[CONCURRENCY_SETTINGS_KEY]).toBe("7");
+  });
+});
+
+describe("runNodesWithConcurrency", () => {
+  interface Deferred {
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (e: unknown) => void;
+  }
+  function deferred(): Deferred {
+    let resolve!: () => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  // Flush pending microtasks so the scheduler advances between assertions.
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  interface Harness {
+    promise: Promise<void>;
+    started: string[];
+    finished: string[];
+    peak: number;
+    ac: AbortController;
+  }
+
+  function run(opts: {
+    levels: { level: number; nodeIds: string[] }[];
+    edges: { source: string; target: string }[];
+    maxConcurrent: number;
+    runners: Record<string, () => Promise<void>>;
+    isRunning?: () => boolean;
+  }): Harness {
+    const nodes = new Map(
+      Object.keys(opts.runners).map((id) => [id, makeNode(id)] as const)
+    );
+    const running = new Set<string>();
+    const h: Harness = {
+      promise: Promise.resolve(),
+      started: [],
+      finished: [],
+      peak: 0,
+      ac: new AbortController(),
+    };
+    h.promise = runNodesWithConcurrency({
+      levels: opts.levels,
+      startLevel: 0,
+      edges: opts.edges,
+      maxConcurrent: opts.maxConcurrent,
+      signal: h.ac.signal,
+      isRunning: opts.isRunning ?? (() => true),
+      getNode: (id) => nodes.get(id),
+      setCurrentNodeIds: () => {},
+      runNode: async (node) => {
+        h.started.push(node.id);
+        running.add(node.id);
+        h.peak = Math.max(h.peak, running.size);
+        try {
+          await opts.runners[node.id]();
+        } finally {
+          running.delete(node.id);
+          h.finished.push(node.id);
+        }
+      },
+      abort: () => h.ac.abort(),
+    });
+    return h;
+  }
+
+  it("respects dependencies: a node waits for its direct upstream", async () => {
+    const d = { a: deferred(), b: deferred(), c: deferred() };
+    const h = run({
+      levels: [
+        { level: 0, nodeIds: ["a"] },
+        { level: 1, nodeIds: ["b"] },
+        { level: 2, nodeIds: ["c"] },
+      ],
+      edges: [
+        { source: "a", target: "b" },
+        { source: "b", target: "c" },
+      ],
+      maxConcurrent: 4,
+      runners: { a: () => d.a.promise, b: () => d.b.promise, c: () => d.c.promise },
+    });
+
+    await tick();
+    expect(h.started).toEqual(["a"]);
+    d.a.resolve();
+    await tick();
+    expect(h.started).toEqual(["a", "b"]);
+    d.b.resolve();
+    await tick();
+    expect(h.started).toEqual(["a", "b", "c"]);
+    d.c.resolve();
+    await h.promise;
+    expect(h.finished).toEqual(["a", "b", "c"]);
+  });
+
+  it("does not cross-block independent branches (the core fix)", async () => {
+    // a->b and c->d are independent chains. d must be able to start as soon as c
+    // finishes, without waiting for the slow a in the same level.
+    const d = { a: deferred(), b: deferred(), c: deferred(), dd: deferred() };
+    const h = run({
+      levels: [
+        { level: 0, nodeIds: ["a", "c"] },
+        { level: 1, nodeIds: ["b", "dd"] },
+      ],
+      edges: [
+        { source: "a", target: "b" },
+        { source: "c", target: "dd" },
+      ],
+      maxConcurrent: 4,
+      runners: {
+        a: () => d.a.promise,
+        b: () => d.b.promise,
+        c: () => d.c.promise,
+        dd: () => d.dd.promise,
+      },
+    });
+
+    await tick();
+    expect(h.started).toEqual(expect.arrayContaining(["a", "c"]));
+
+    // c finishes while a is still running -> dd starts, b does NOT (a pending)
+    d.c.resolve();
+    await tick();
+    expect(h.started).toContain("dd");
+    expect(h.started).not.toContain("b");
+
+    d.a.resolve();
+    await tick();
+    expect(h.started).toContain("b");
+
+    d.b.resolve();
+    d.dd.resolve();
+    await h.promise;
+    expect(h.finished.sort()).toEqual(["a", "b", "c", "dd"]);
+  });
+
+  it("never exceeds the concurrency limit", async () => {
+    const d = { a: deferred(), b: deferred(), c: deferred(), e: deferred() };
+    const h = run({
+      levels: [{ level: 0, nodeIds: ["a", "b", "c", "e"] }],
+      edges: [],
+      maxConcurrent: 2,
+      runners: {
+        a: () => d.a.promise,
+        b: () => d.b.promise,
+        c: () => d.c.promise,
+        e: () => d.e.promise,
+      },
+    });
+
+    await tick();
+    expect(h.started).toHaveLength(2);
+    expect(h.peak).toBe(2);
+
+    d.a.resolve();
+    d.b.resolve();
+    await tick();
+    expect(h.started).toHaveLength(4);
+    expect(h.peak).toBe(2);
+
+    d.c.resolve();
+    d.e.resolve();
+    await h.promise;
+    expect(h.finished).toHaveLength(4);
+  });
+
+  it("fails fast: a rejecting node aborts and downstream never starts", async () => {
+    const h = run({
+      levels: [
+        { level: 0, nodeIds: ["a"] },
+        { level: 1, nodeIds: ["b"] },
+      ],
+      edges: [{ source: "a", target: "b" }],
+      maxConcurrent: 2,
+      runners: {
+        a: () => Promise.reject(new Error("boom")),
+        b: () => Promise.resolve(),
+      },
+    });
+
+    await expect(h.promise).rejects.toThrow("boom");
+    expect(h.started).toEqual(["a"]);
+    expect(h.ac.signal.aborted).toBe(true);
+  });
+
+  it("stops launching new nodes when isRunning() becomes false (pause)", async () => {
+    let running = true;
+    const h = run({
+      levels: [
+        { level: 0, nodeIds: ["a"] },
+        { level: 1, nodeIds: ["b"] },
+      ],
+      edges: [{ source: "a", target: "b" }],
+      maxConcurrent: 2,
+      isRunning: () => running,
+      runners: {
+        a: async () => {
+          running = false; // simulate a pause edge stopping the run
+        },
+        b: () => Promise.resolve(),
+      },
+    });
+
+    await h.promise; // resolves (not rejects) on cooperative stop
+    expect(h.started).toEqual(["a"]);
   });
 });
