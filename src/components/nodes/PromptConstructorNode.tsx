@@ -22,6 +22,29 @@ export function PromptConstructorNode({ id, data, selected }: NodeProps<PromptCo
   const [isEditing, setIsEditing] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const localTemplateRef = useRef(localTemplate);
+  const storedTemplateRef = useRef(nodeData.template);
+  const isEditingRef = useRef(isEditing);
+
+  useEffect(() => {
+    localTemplateRef.current = localTemplate;
+  }, [localTemplate]);
+
+  useEffect(() => {
+    storedTemplateRef.current = nodeData.template;
+  }, [nodeData.template]);
+
+  useEffect(() => {
+    isEditingRef.current = isEditing;
+  }, [isEditing]);
+
+  useEffect(() => {
+    return () => {
+      if (isEditingRef.current && localTemplateRef.current !== storedTemplateRef.current) {
+        useWorkflowStore.getState().updateNodeData(id, { template: localTemplateRef.current });
+      }
+    };
+  }, [id]);
 
   // Sync from props when not actively editing
   useEffect(() => {

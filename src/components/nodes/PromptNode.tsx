@@ -25,6 +25,29 @@ export function PromptNode({ id, data, selected }: NodeProps<PromptNodeType>) {
   // Variable naming dialog state
   const [showVarDialog, setShowVarDialog] = useState(false);
   const [varNameInput, setVarNameInput] = useState(nodeData.variableName || "");
+  const localPromptRef = useRef(localPrompt);
+  const storedPromptRef = useRef(nodeData.prompt);
+  const isEditingRef = useRef(isEditing);
+
+  useEffect(() => {
+    localPromptRef.current = localPrompt;
+  }, [localPrompt]);
+
+  useEffect(() => {
+    storedPromptRef.current = nodeData.prompt;
+  }, [nodeData.prompt]);
+
+  useEffect(() => {
+    isEditingRef.current = isEditing;
+  }, [isEditing]);
+
+  useEffect(() => {
+    return () => {
+      if (isEditingRef.current && localPromptRef.current !== storedPromptRef.current) {
+        useWorkflowStore.getState().updateNodeData(id, { prompt: localPromptRef.current });
+      }
+    };
+  }, [id]);
 
   // Check if this node has any incoming text connections
   const hasIncomingTextConnection = useMemo(() => {
