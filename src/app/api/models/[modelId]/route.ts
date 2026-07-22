@@ -1555,6 +1555,69 @@ function extractWaveSpeedSchema(
   return extractParametersFromSchema(requestSchema as Record<string, unknown>);
 }
 
+/**
+ * Get hardcoded schema for REVE models
+ * REVE doesn't have a schema discovery API, so we define these manually.
+ */
+function getReveSchema(modelId: string): ExtractedSchema {
+  const REVE_ASPECT_RATIOS = ["1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4"];
+
+  switch (modelId) {
+    case "reve-2/text-to-image":
+      return {
+        parameters: [
+          {
+            name: "aspect_ratio",
+            type: "string",
+            description: "Output image aspect ratio",
+            enum: REVE_ASPECT_RATIOS,
+            default: "1:1",
+          },
+          {
+            name: "negative_prompt",
+            type: "string",
+            description: "What to exclude from the generated image",
+            default: "",
+          },
+        ],
+        inputs: [
+          { name: "prompt", type: "text", required: true, label: "Prompt" },
+        ],
+      };
+
+    case "reve-2/image-to-image":
+      return {
+        parameters: [
+          {
+            name: "negative_prompt",
+            type: "string",
+            description: "What to exclude from the edited image",
+            default: "",
+          },
+        ],
+        inputs: [
+          { name: "prompt", type: "text", required: true, label: "Edit Instruction" },
+          { name: "image_url", type: "image", required: true, label: "Source Image" },
+        ],
+      };
+
+    default:
+      // Fallback: basic text-to-image schema
+      return {
+        parameters: [
+          {
+            name: "aspect_ratio",
+            type: "string",
+            description: "Output image aspect ratio",
+            enum: REVE_ASPECT_RATIOS,
+            default: "1:1",
+          },
+        ],
+        inputs: [{ name: "prompt", type: "text", required: true, label: "Prompt" }],
+      };
+  }
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ modelId: string }> }
@@ -1564,11 +1627,11 @@ export async function GET(
   const decodedModelId = decodeURIComponent(modelId);
   const provider = request.nextUrl.searchParams.get("provider") as ProviderType | null;
 
-  if (!provider || (provider !== "replicate" && provider !== "fal" && provider !== "kie" && provider !== "wavespeed" && provider !== "gemini" && provider !== "openai")) {
+  if (!provider || (provider !== "replicate" && provider !== "fal" && provider !== "kie" && provider !== "wavespeed" && provider !== "gemini" && provider !== "openai" && provider !== "reve")) {
     return NextResponse.json<SchemaErrorResponse>(
       {
         success: false,
-        error: "Invalid or missing provider. Use ?provider=replicate, ?provider=fal, ?provider=kie, ?provider=wavespeed, ?provider=openai, or ?provider=gemini",
+        error: "Invalid or missing provider. Use ?provider=replicate, ?provider=fal, ?provider=kie, ?provider=wavespeed, ?provider=openai, ?provider=reve, or ?provider=gemini",
       },
       { status: 400 }
     );
@@ -1616,6 +1679,9 @@ export async function GET(
     } else if (provider === "kie") {
       // Kie.ai uses hardcoded schemas (no schema discovery API)
       result = getKieSchema(decodedModelId);
+    } else if (provider === "reve") {
+      // REVE uses hardcoded schemas (no schema discovery API)
+      result = getReveSchema(decodedModelId);
     } else if (provider === "wavespeed") {
       // WaveSpeed uses dynamic schemas from API, with static fallback
       const apiKey = request.headers.get("X-WaveSpeed-Key") || process.env.WAVESPEED_API_KEY || null;
