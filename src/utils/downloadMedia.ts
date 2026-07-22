@@ -96,3 +96,58 @@ function triggerDownload(href: string, filename: string): void {
   link.click();
   document.body.removeChild(link);
 }
+
+/**
+ * Copy an image to the system clipboard.
+ *
+ * Browsers only reliably accept `image/png` on the clipboard, so non-PNG
+ * sources are re-encoded via canvas. Handles data URLs and (CORS-permitting)
+ * HTTP URLs. Passing a Promise to ClipboardItem preserves the user-gesture
+ * requirement across the async encode.
+ *
+ * @returns true on success, false if unsupported or the write failed.
+ */
+export async function copyImageToClipboard(src: string): Promise<boolean> {
+  if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
+    console.error("Image clipboard copy is not supported in this browser");
+    return false;
+  }
+  try {
+    await navigator.clipboard.write([
+      new ClipboardItem({ "image/png": toPngBlob(src) }),
+    ]);
+    return true;
+  } catch (error) {
+    console.error("Failed to copy image to clipboard:", error);
+    return false;
+  }
+}
+
+/** Fetch/convert an image src to a PNG blob (re-encoding only when needed). */
+async function toPngBlob(src: string): Promise<Blob> {
+  const blob = await (await fetch(src)).blob();
+  if (blob.type === "image/png") return blob;
+
+  const url = URL.createObjectURL(blob);
+  try {
+    return await new Promise<Blob>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return reject(new Error("Could not get canvas context"));
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob(
+          (out) => (out ? resolve(out) : reject(new Error("Canvas toBlob returned null"))),
+          "image/png",
+        );
+      };
+      img.onerror = () => reject(new Error("Failed to load image for clipboard copy"));
+      img.src = url;
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}

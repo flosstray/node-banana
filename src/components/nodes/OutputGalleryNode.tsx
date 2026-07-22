@@ -9,7 +9,8 @@ import { OutputGalleryNodeData } from "@/types";
 import { useAdaptiveImageSrc } from "@/hooks/useAdaptiveImageSrc";
 import { useVideoBlobUrl } from "@/hooks/useVideoBlobUrl";
 import { defaultNodeDimensions } from "@/store/utils/nodeDefaults";
-import { downloadMedia as downloadMediaUtil } from "@/utils/downloadMedia";
+import { downloadMedia as downloadMediaUtil, copyImageToClipboard } from "@/utils/downloadMedia";
+import { useToast } from "@/components/Toast";
 import { useShowHandleLabels } from "@/hooks/useShowHandleLabels";
 import { HandleLabel } from "./HandleLabel";
 
@@ -202,6 +203,18 @@ export function OutputGalleryNode({ id, data, selected }: NodeProps<OutputGaller
 
     downloadMediaUtil(item.src, item.type).catch((err) =>
       console.error("Gallery download failed:", err)
+    );
+  }, [lightboxIndex, displayMedia]);
+
+  const copyImage = useCallback(async () => {
+    if (lightboxIndex === null) return;
+    const item = displayMedia[lightboxIndex];
+    if (!item || item.type !== "image") return;
+
+    const ok = await copyImageToClipboard(item.src);
+    useToast.getState().show(
+      ok ? "Image copied to clipboard" : "Couldn't copy image",
+      ok ? "success" : "error",
     );
   }, [lightboxIndex, displayMedia]);
 
@@ -425,8 +438,19 @@ export function OutputGalleryNode({ id, data, selected }: NodeProps<OutputGaller
                 </svg>
               </button>
 
-              {/* Download + Remove buttons */}
+              {/* Copy + Download + Remove buttons */}
               <div className="absolute top-4 left-4 flex gap-1.5">
+                {displayMedia[lightboxIndex]?.type === "image" && (
+                  <button
+                    onClick={copyImage}
+                    className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded text-white text-xs font-medium transition-colors flex items-center gap-1.5"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    Copy
+                  </button>
+                )}
                 <button
                   onClick={downloadMedia}
                   className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded text-white text-xs font-medium transition-colors flex items-center gap-1.5"
