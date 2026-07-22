@@ -622,6 +622,22 @@ const REVE_MODELS: ProviderModel[] = [
   },
 ];
 
+// Recraft V3 (SVG) — vector / logo generation. Runs on Replicate (owner/name id),
+// so it uses the standard Replicate generate + schema path; pinned here so it's
+// always discoverable when a Replicate key is present, without searching.
+const RECRAFT_MODELS: ProviderModel[] = [
+  {
+    id: "recraft-ai/recraft-v3-svg",
+    name: "Recraft V3 (SVG)",
+    description: "Vector image & logo generation — outputs true SVG. Ideal for logos, icons, and flat illustration. Choose a style (vector_illustration, icon) and size.",
+    provider: "replicate",
+    capabilities: ["text-to-image"],
+    coverImage: undefined,
+    pricing: undefined,
+    pageUrl: "https://replicate.com/recraft-ai/recraft-v3-svg",
+  },
+];
+
 // WaveSpeed models are now fetched dynamically from https://api.wavespeed.ai/api/v3/models
 
 // ============ Replicate Types ============
@@ -1447,6 +1463,25 @@ export async function GET(
       cached: true,
     };
     anyFromCache = true;
+  }
+
+  // Pin Recraft V3 (SVG) whenever a Replicate key is present. It runs via the
+  // standard Replicate path, but is hardcoded here so vector/logo generation is
+  // always visible without searching Replicate's catalog.
+  if (replicateKey && (!providerFilter || providerFilter === "replicate")) {
+    let recraftModels = RECRAFT_MODELS;
+    if (searchQuery) {
+      recraftModels = filterModelsBySearch(recraftModels, searchQuery);
+    }
+    if (recraftModels.length > 0) {
+      allModels.push(...recraftModels);
+      providerResults["recraft"] = {
+        success: true,
+        count: recraftModels.length,
+        cached: true,
+      };
+      anyFromCache = true;
+    }
   }
 
   // Fetch from each provider (replicate, fal, wavespeed)
