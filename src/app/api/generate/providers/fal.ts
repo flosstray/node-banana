@@ -7,6 +7,7 @@
 
 import { GenerationInput, GenerationOutput } from "@/lib/providers/types";
 import { validateMediaUrl } from "@/utils/urlValidation";
+import { correctSvgContentType } from "@/utils/svgDetection";
 import {
   INPUT_PATTERNS,
   InputMapping,
@@ -577,12 +578,17 @@ export async function generateWithFalQueue(
         };
       }
 
-      const contentType = rawContentType || (isVideoModel ? "video/mp4" : "image/png");
+      let contentType = rawContentType || (isVideoModel ? "video/mp4" : "image/png");
       const isVideo = contentType.startsWith("video/");
 
       const mediaArrayBuffer = await mediaResponse.arrayBuffer();
       const mediaSizeBytes = mediaArrayBuffer.byteLength;
       const mediaSizeMB = mediaSizeBytes / (1024 * 1024);
+
+      // fal serves .svg outputs (vectorize / image2svg) as application/octet-stream,
+      // which won't render in an <img>. Correct it to image/svg+xml so the data URL
+      // displays and downloads as .svg.
+      contentType = correctSvgContentType(contentType, mediaUrl, mediaArrayBuffer);
 
       // Post-download size guard in case content-length was missing/inaccurate (mirrors kie.ts)
       if (mediaSizeBytes > MAX_MEDIA_SIZE) {

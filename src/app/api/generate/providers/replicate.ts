@@ -6,6 +6,7 @@
 
 import { GenerationInput, GenerationOutput } from "@/lib/providers/types";
 import { validateMediaUrl } from "@/utils/urlValidation";
+import { correctSvgContentType } from "@/utils/svgDetection";
 import {
   getParameterTypesFromSchema,
   coerceParameterTypes,
@@ -286,13 +287,17 @@ export async function generateWithReplicate(
   }
 
   // Determine MIME type from response
-  const contentType = mediaResponse.headers.get("content-type") || "image/png";
+  let contentType = mediaResponse.headers.get("content-type") || "image/png";
   const isVideo = contentType.startsWith("video/");
   const isConcreteMedia = contentType.startsWith("audio/") || contentType.startsWith("video/") || contentType.startsWith("image/");
   const isAudio = contentType.startsWith("audio/") ||
     (!isConcreteMedia && input.model.capabilities.some(c => c.includes("audio")));
 
   const mediaArrayBuffer = await mediaResponse.arrayBuffer();
+
+  // Correct SVG outputs served with a generic content-type (e.g. octet-stream)
+  // so the resulting data URL renders as an image.
+  contentType = correctSvgContentType(contentType, mediaUrl, mediaArrayBuffer);
   const mediaSizeBytes = mediaArrayBuffer.byteLength;
   const mediaSizeMB = mediaSizeBytes / (1024 * 1024);
 
