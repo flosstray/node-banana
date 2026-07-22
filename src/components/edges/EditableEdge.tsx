@@ -54,11 +54,9 @@ export function EditableEdge({
   const [isDragging, setIsDragging] = useState(false);
 
   // Narrow selector: returns boolean, only re-renders when selection relevance changes
-  const isConnectedToSelection = useWorkflowStore((state) => {
-    const selectedNodes = state.nodes.filter((n) => n.selected);
-    if (selectedNodes.length === 0) return false;
-    return selectedNodes.some((n) => n.id === source || n.id === target);
-  });
+  const isConnectedToSelection = useWorkflowStore((state) =>
+    state.nodes.some((n) => n.selected && (n.id === source || n.id === target))
+  );
 
   const edgeData = data as EdgeData | undefined;
   const offsetX = edgeData?.offsetX ?? 0;

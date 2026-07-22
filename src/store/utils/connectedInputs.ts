@@ -20,6 +20,9 @@ import {
   EaseCurveNodeData,
   VideoTrimNodeData,
   VideoFrameGrabNodeData,
+  RemoveBackgroundNodeData,
+  ImageResizeNodeData,
+  GifEncoderNodeData,
   PromptNodeData,
   ArrayNodeData,
   PromptConstructorNodeData,
@@ -117,6 +120,12 @@ export function getSourceOutput(
     return { type: "text", value: (sourceNode.data as LLMGenerateNodeData).outputText };
   } else if (sourceNode.type === "videoFrameGrab") {
     return { type: "image", value: (sourceNode.data as VideoFrameGrabNodeData).outputImage };
+  } else if (sourceNode.type === "removeBackground") {
+    return { type: "image", value: (sourceNode.data as RemoveBackgroundNodeData).outputImage };
+  } else if (sourceNode.type === "imageResize") {
+    return { type: "image", value: (sourceNode.data as ImageResizeNodeData).outputImage };
+  } else if (sourceNode.type === "gifEncoder") {
+    return { type: "image", value: (sourceNode.data as GifEncoderNodeData).outputGif };
   } else if (sourceNode.type === "glbViewer") {
     return { type: "image", value: (sourceNode.data as GLBViewerNodeData).capturedImage };
   }
@@ -191,11 +200,19 @@ export function getConnectedInputsPure(
     const imageInputs = inputSchema.filter(i => i.type === "image");
     const textInputs = inputSchema.filter(i => i.type === "text");
     const audioInputs = inputSchema.filter(i => i.type === "audio");
+    const videoInputs = inputSchema.filter(i => i.type === "video");
 
     imageInputs.forEach((input, index) => {
       handleToSchemaName[`image-${index}`] = input.name;
       if (index === 0) {
         handleToSchemaName["image"] = input.name;
+      }
+    });
+
+    videoInputs.forEach((input, index) => {
+      handleToSchemaName[`video-${index}`] = input.name;
+      if (index === 0) {
+        handleToSchemaName["video"] = input.name;
       }
     });
 
@@ -213,6 +230,27 @@ export function getConnectedInputsPure(
       }
     });
   }
+
+  // Populate dynamicInputs for a passthrough (router/switch) edge, mirroring the direct-connection
+  // mapping further below. Those branches `return` before that block runs, so without this a routed
+  // input never reaches dynamicInputs (the named schema slots) — which breaks generateVideo
+  // multi-image slots, video inputs, and negative prompts. (Surfaced as "Failed to fetch result: 422".)
+  const addPassthroughDynamicInput = (
+    targetHandle: string | null | undefined,
+    values: Array<string | null> | string | null,
+  ): void => {
+    if (!targetHandle) return;
+    const schemaName = handleToSchemaName[targetHandle];
+    if (!schemaName) return; // node has no schema slot for this handle (e.g. nanoBanana) → no-op
+    const list = Array.isArray(values) ? values : [values];
+    for (const v of list) {
+      if (v == null) continue;
+      const existing = dynamicInputs[schemaName];
+      dynamicInputs[schemaName] = existing !== undefined
+        ? (Array.isArray(existing) ? [...existing, v] : [existing, v])
+        : v;
+    }
+  };
 
   // Cache passthrough node results so multiple edges from the same router/switch
   // all receive correct data (the _visited set prevents re-traversal, so we cache
@@ -251,16 +289,21 @@ export function getConnectedInputsPure(
 
         if (edgeType === "image" || (!edgeType && isImageHandle(edge.sourceHandle))) {
           images.push(...routerInputs.images);
+          addPassthroughDynamicInput(edge.targetHandle, routerInputs.images);
         } else if (edgeType === "text" || (!edgeType && isTextHandle(edge.sourceHandle))) {
           if (routerInputs.text) text = routerInputs.text;
+          addPassthroughDynamicInput(edge.targetHandle, routerInputs.text);
         } else if (edgeType === "video") {
           videos.push(...routerInputs.videos);
+          addPassthroughDynamicInput(edge.targetHandle, routerInputs.videos);
         } else if (edgeType === "audio") {
           audio.push(...routerInputs.audio);
+          addPassthroughDynamicInput(edge.targetHandle, routerInputs.audio);
         } else if (edgeType === "3d") {
           if (routerInputs.model3d) model3d = routerInputs.model3d;
+          addPassthroughDynamicInput(edge.targetHandle, routerInputs.model3d);
         } else if (edgeType === "easeCurve") {
-          // EaseCurve passthrough
+          // EaseCurve passthrough (not a schema-named input → no dynamicInputs mapping)
           if (routerInputs.easeCurve) easeCurve = routerInputs.easeCurve;
         }
         return; // Skip normal getSourceOutput processing for this edge
@@ -285,14 +328,19 @@ export function getConnectedInputsPure(
 
         if (edgeType === "image") {
           images.push(...switchInputs.images);
+          addPassthroughDynamicInput(edge.targetHandle, switchInputs.images);
         } else if (edgeType === "text") {
           if (switchInputs.text) text = switchInputs.text;
+          addPassthroughDynamicInput(edge.targetHandle, switchInputs.text);
         } else if (edgeType === "video") {
           videos.push(...switchInputs.videos);
+          addPassthroughDynamicInput(edge.targetHandle, switchInputs.videos);
         } else if (edgeType === "audio") {
           audio.push(...switchInputs.audio);
+          addPassthroughDynamicInput(edge.targetHandle, switchInputs.audio);
         } else if (edgeType === "3d") {
           if (switchInputs.model3d) model3d = switchInputs.model3d;
+          addPassthroughDynamicInput(edge.targetHandle, switchInputs.model3d);
         } else if (edgeType === "easeCurve") {
           if (switchInputs.easeCurve) easeCurve = switchInputs.easeCurve;
         }
@@ -327,6 +375,12 @@ export function getConnectedInputsPure(
         // Active output (or paused): ConditionalSwitch is a gate — trigger downstream but don't pass data through
         return;
       }
+
+      // Settings edges into an EaseCurve target handle carry only the curve/
+      // settings, not a video. The dedicated extraction below (targetHandle ===
+      // "easeCurve") handles them. Processing them here would push the source
+      // node's outputVideo into videos[] and ease the wrong video.
+      if (edge.targetHandle === "easeCurve") return;
 
       const handleId = edge.targetHandle;
       const { type, value } = getSourceOutput(
@@ -417,17 +471,23 @@ export function validateWorkflowPure(
       }
     });
 
-  // Check generateVideo nodes have required text input
+  // Check generateVideo nodes have at least one usable input connected.
+  // A prompt is not always required: video-to-video models (e.g. upscalers)
+  // need only a video input, image-to-video needs an image, etc. This mirrors
+  // the executor, which runs as long as any of text/image/video/audio is present.
   nodes
     .filter((n) => n.type === "generateVideo")
     .forEach((node) => {
-      const textConnected = edges.some(
+      const hasInput = edges.some(
         (e) => e.target === node.id &&
                !e.data?.isLoop &&
-               (e.targetHandle === "text" || e.targetHandle?.startsWith("text-"))
+               (e.targetHandle === "text" || e.targetHandle?.startsWith("text-") ||
+                e.targetHandle === "image" || e.targetHandle?.startsWith("image-") ||
+                e.targetHandle === "video" || e.targetHandle?.startsWith("video-") ||
+                e.targetHandle === "audio" || e.targetHandle?.startsWith("audio-"))
       );
-      if (!textConnected) {
-        errors.push(`Video node "${node.id}" missing text input`);
+      if (!hasInput) {
+        errors.push(`Video node "${node.id}" missing input`);
       }
     });
 
@@ -449,6 +509,18 @@ export function validateWorkflowPure(
       const imageConnected = edges.some((e) => e.target === node.id);
       if (!imageConnected) {
         errors.push(`Output node "${node.id}" missing image input`);
+      }
+    });
+
+  // Check split grid nodes have an image to split
+  nodes
+    .filter((n) => n.type === "splitGrid")
+    .forEach((node) => {
+      const imageConnected = edges.some(
+        (e) => e.target === node.id && !e.data?.isLoop && e.targetHandle === "image"
+      );
+      if (!imageConnected) {
+        errors.push(`Split Grid node "${node.id}" missing image input`);
       }
     });
 

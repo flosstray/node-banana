@@ -42,6 +42,9 @@ export type NodeType =
   | "easeCurve"
   | "videoTrim"
   | "videoFrameGrab"
+  | "removeBackground"
+  | "imageResize"
+  | "gifEncoder"
   | "router"
   | "switch"
   | "conditionalSwitch"
@@ -173,7 +176,7 @@ export interface CarouselVideoItem {
  */
 export interface ModelInputDef {
   name: string;
-  type: "image" | "text" | "audio";
+  type: "image" | "text" | "audio" | "video";
   required: boolean;
   label: string;
   description?: string;
@@ -413,6 +416,23 @@ export interface VideoFrameGrabNodeData extends BaseNodeData {
 }
 
 /**
+ * Background removal model quality preset (IMG.LY v1.7+)
+ */
+export type BackgroundRemovalModel = "isnet_quint8" | "isnet_fp16" | "isnet";
+
+/**
+ * Remove Background node - removes image backgrounds client-side
+ */
+export interface RemoveBackgroundNodeData extends BaseNodeData {
+  model: BackgroundRemovalModel;
+  outputImage: string | null;
+  outputImageRef?: string;
+  status: NodeStatus;
+  error: string | null;
+  progress: number;
+}
+
+/**
  * Router node - pure passthrough routing node with dynamic multi-type handles
  */
 export interface RouterNodeData extends BaseNodeData {
@@ -457,13 +477,68 @@ export interface ConditionalSwitchNodeData extends BaseNodeData {
 }
 
 /**
+ * A node within a split-grid cell template. Positions are in main-canvas
+ * coordinate space, relative to the template's bounding box.
+ */
+export interface SplitGridTemplateNode {
+  id: string;
+  type: NodeType;
+  position: { x: number; y: number };
+  /** Node dimensions; falls back to defaultNodeDimensions when absent */
+  size?: { width: number; height: number };
+  /** Partial node data overrides applied on top of createDefaultNodeData(type) */
+  data?: Record<string, unknown>;
+}
+
+export interface SplitGridTemplateEdge {
+  id: string;
+  source: string;
+  sourceHandle: string;
+  target: string;
+  targetHandle: string;
+}
+
+/**
+ * Per-cell node template for a split-grid node. Always contains a base
+ * image node (`baseNodeId`) that receives the split cell image.
+ */
+export interface SplitGridTemplate {
+  baseNodeId: string;
+  nodes: SplitGridTemplateNode[];
+  edges: SplitGridTemplateEdge[];
+}
+
+/**
+ * One materialized cell: the real canvas nodes instantiated from the template.
+ */
+export interface SplitGridCell {
+  /** Real node id of the imageInput that receives this cell's split image */
+  baseImageNodeId: string;
+  /** All real node ids instantiated for this cell (includes the base) */
+  nodeIds: string[];
+  /** Group created around this cell's nodes */
+  groupId?: string;
+}
+
+/**
  * Split Grid node - splits image into grid cells for parallel processing
  */
 export interface SplitGridNodeData extends BaseNodeData {
   sourceImage: string | null;
   sourceImageRef?: string; // External image reference for storage optimization
-  targetCount: number; // 4, 6, 8, 9, or 10
+  gridRows: number;
+  gridCols: number;
+  /** Per-cell node template; undefined on legacy saves (treated as image-only default) */
+  template?: SplitGridTemplate;
+  /** Materialized cells; undefined on legacy saves (falls back to childNodeIds) */
+  cells?: SplitGridCell[];
+  /** Snapshot key of rows/cols/template at last materialization, for staleness detection */
+  materializedKey?: string | null;
+  /** @deprecated Legacy pre-template field, kept for backward compatibility */
+  targetCount: number;
+  /** @deprecated Legacy pre-template field, kept for backward compatibility */
   defaultPrompt: string;
+  /** @deprecated Legacy pre-template field, kept for backward compatibility */
   generateSettings: {
     aspectRatio: AspectRatio;
     resolution: Resolution;
@@ -471,16 +546,59 @@ export interface SplitGridNodeData extends BaseNodeData {
     useGoogleSearch: boolean;
     useImageSearch: boolean;
   };
+  /** @deprecated Legacy pre-template cell tracking; new workflows use `cells` */
   childNodeIds: Array<{
     imageInput: string;
     prompt: string;
     nanoBanana: string;
   }>;
-  gridRows: number;
-  gridCols: number;
+  /** @deprecated Legacy configuration gate; template-based nodes are always usable */
   isConfigured: boolean;
   status: NodeStatus;
   error: string | null;
+}
+
+/**
+ * Image Resize node - resize, refit, and re-encode a single image
+ */
+export type ImageResizeMode = "exact" | "maxEdge" | "scale";
+export type ImageResizeFit = "contain" | "cover" | "stretch";
+export type ImageResizeFormat = "keep" | "png" | "jpeg" | "webp";
+
+export interface ImageResizeNodeData extends BaseNodeData {
+  sourceImage: string | null;
+  outputImage: string | null;
+  mode: ImageResizeMode;
+  width: number;          // used in exact mode
+  height: number;         // used in exact mode
+  maxEdge: number;        // used in maxEdge mode
+  scalePct: number;       // used in scale mode (0-400)
+  fit: ImageResizeFit;
+  padColor: string;       // hex color for "contain" letterboxing
+  format: ImageResizeFormat;
+  quality: number;        // 0-1 for jpeg/webp
+  outputDimensions: { width: number; height: number } | null;
+  outputBytes: number | null;
+  status: NodeStatus;
+  error: string | null;
+}
+
+/**
+ * Gif Encoder node - assembles N image frames into an animated GIF
+ */
+export interface GifEncoderNodeData extends BaseNodeData {
+  clipOrder: string[];          // edge IDs in user-defined order
+  outputGif: string | null;     // GIF data URL
+  fps: number;                  // 1-30
+  loopCount: number;            // 0 = infinite, otherwise N
+  colorCount: number;           // 2-256
+  dither: boolean;
+  targetMaxBytes: number | null; // when set, auto-tune until under this size
+  outputBytes: number | null;
+  outputDimensions: { width: number; height: number } | null;
+  status: NodeStatus;
+  error: string | null;
+  progress: number;             // 0-100
 }
 
 /**
@@ -517,6 +635,9 @@ export type WorkflowNodeData =
   | EaseCurveNodeData
   | VideoTrimNodeData
   | VideoFrameGrabNodeData
+  | RemoveBackgroundNodeData
+  | ImageResizeNodeData
+  | GifEncoderNodeData
   | RouterNodeData
   | SwitchNodeData
   | ConditionalSwitchNodeData

@@ -139,7 +139,8 @@ function trimAudioBuffer(buffer: AudioBuffer, targetDuration: number): AudioBuff
 export async function stitchVideosAsync(
   videoBlobs: Blob[],
   audioData?: AudioData | null,
-  onProgress?: (progress: StitchProgress) => void
+  onProgress?: (progress: StitchProgress) => void,
+  signal?: AbortSignal
 ): Promise<Blob> {
   try {
     // Initialize progress
@@ -228,6 +229,8 @@ export async function stitchVideosAsync(
       let referenceChannels: number | null = null;
 
       for (let i = 0; i < videoBlobs.length; i++) {
+        // Checked before the per-clip try so a Stop isn't swallowed by its catch.
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         try {
           const blobSource = new BlobSource(videoBlobs[i]);
           const input = new Input({ source: blobSource, formats: ALL_FORMATS });
@@ -386,6 +389,7 @@ export async function stitchVideosAsync(
 
     // Process each video blob
     for (let videoIndex = 0; videoIndex < videoBlobs.length; videoIndex++) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       const videoBlob = videoBlobs[videoIndex];
       const videoNumber = videoIndex + 1;
 
@@ -424,6 +428,10 @@ export async function stitchVideosAsync(
         // Read and write samples from this video
         let samplesFromThisVideo = 0;
         for await (const sample of sink.samples(0, videoDuration)) {
+          if (signal?.aborted) {
+            sample.close();
+            throw new DOMException("Aborted", "AbortError");
+          }
           const originalTimestamp = sample.timestamp ?? 0;
 
           // On first sample, record the minimum timestamp to normalize from
@@ -469,6 +477,8 @@ export async function stitchVideosAsync(
           }
         }
       } catch (videoError) {
+        // A user Stop must propagate as an AbortError, not a per-video failure.
+        if (videoError instanceof DOMException && videoError.name === "AbortError") throw videoError;
         const errorMsg =
           videoError instanceof Error
             ? videoError.message
@@ -530,6 +540,8 @@ export async function stitchVideosAsync(
       }
     }
   } catch (error) {
+    // Preserve cancellation as an AbortError so the executor treats Stop as idle.
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
     const normalizedError =
       error instanceof Error ? error : new Error(String(error));
     console.error('Video stitching error:', normalizedError);

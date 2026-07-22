@@ -250,6 +250,44 @@ describe("getConnectedInputsPure", () => {
     expect(result.dynamicInputs).toEqual({ image_url: "data:image/png;base64,a" });
   });
 
+  it("should populate dynamicInputs through a router passthrough (regression: router bypassed dynamicInputs → 422)", () => {
+    const nodes = [
+      makeNode("img", "imageInput", { image: "data:image/png;base64,a" }),
+      makeNode("r", "router"),
+      makeNode("gen", "nanoBanana", {
+        inputSchema: [{ name: "image_url", type: "image" }],
+      }),
+    ];
+    const edges = [
+      makeEdge("img", "r", "image"),   // source → router
+      makeEdge("r", "gen", "image-0"), // router → generate (named schema slot)
+    ];
+    const result = getConnectedInputsPure("gen", nodes, edges);
+    // Before the fix, dynamicInputs was empty for routed inputs (router returned early) → 422
+    expect(result.dynamicInputs).toEqual({ image_url: "data:image/png;base64,a" });
+    // images[] still populated too (nanoBanana path unaffected)
+    expect(result.images).toEqual(["data:image/png;base64,a"]);
+  });
+
+  it("should map a connected video into dynamicInputs and videos via schema", () => {
+    const nodes = [
+      makeNode("vid", "videoInput", { video: "data:video/mp4;base64,v" }),
+      makeNode("gen", "generateVideo", {
+        inputSchema: [{ name: "video_url", type: "video" }],
+      }),
+    ];
+    const edges = [{
+      id: "vid-gen",
+      source: "vid",
+      target: "gen",
+      sourceHandle: "video",
+      targetHandle: "video-0",
+    }] as WorkflowEdge[];
+    const result = getConnectedInputsPure("gen", nodes, edges);
+    expect(result.dynamicInputs).toEqual({ video_url: "data:video/mp4;base64,v" });
+    expect(result.videos).toEqual(["data:video/mp4;base64,v"]);
+  });
+
   it("should extract easeCurve data", () => {
     const nodes = [
       makeNode("ec", "easeCurve", {
@@ -335,11 +373,28 @@ describe("validateWorkflowPure", () => {
     expect(result.errors[0]).toContain("missing text input");
   });
 
-  it("should detect missing text input on generateVideo", () => {
+  it("should detect missing input on generateVideo when nothing is connected", () => {
     const nodes = [makeNode("vid", "generateVideo")];
     const result = validateWorkflowPure(nodes, []);
     expect(result.valid).toBe(false);
-    expect(result.errors[0]).toContain("missing text input");
+    expect(result.errors[0]).toContain("missing input");
+  });
+
+  it("should pass generateVideo with only a video input connected (no prompt required)", () => {
+    const nodes = [
+      makeNode("src", "videoInput", { video: "data:video/mp4;base64,v" }),
+      makeNode("vid", "generateVideo"),
+    ];
+    const edges = [{
+      id: "src-vid",
+      source: "src",
+      target: "vid",
+      sourceHandle: "video",
+      targetHandle: "video-0",
+    }] as WorkflowEdge[];
+    const result = validateWorkflowPure(nodes, edges);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 
   it("should detect missing image input on annotation without manual image", () => {

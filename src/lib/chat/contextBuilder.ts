@@ -216,11 +216,21 @@ export function formatContextForPrompt(context: WorkflowContext): string {
 
   const lines: string[] = [];
 
-  // List nodes
+  // List nodes with their current parameters/settings so the model can see
+  // (and correctly edit) values like prompt, resolution, aspectRatio, etc.
+  // Binary fields have already been replaced with lightweight placeholders by
+  // stripBinaryData, so serializing node.data here is safe (no base64 payloads).
   lines.push(`Current workflow has ${context.nodeCount} node(s):`);
   for (const node of context.nodes) {
     const title = (node.data.customTitle as string) || generateNodeTitle(node.type);
-    lines.push(`  - ${node.id}: ${title}`);
+    lines.push(`  - ${node.id} (${node.type}): ${title}`);
+
+    // Emit the remaining settings as a compact JSON block. customTitle is
+    // already shown as the title above, so omit it to avoid duplication.
+    const { customTitle: _customTitle, ...settings } = node.data;
+    if (Object.keys(settings).length > 0) {
+      lines.push(`    settings: ${JSON.stringify(settings)}`);
+    }
   }
 
   // List connections

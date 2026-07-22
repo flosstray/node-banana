@@ -94,6 +94,11 @@ export async function generateWithGemini(
     tools.push({ googleSearch: {} });
   }
 
+  // tools is a field of GenerateContentConfig, not a top-level generateContent param
+  if (tools.length > 0) {
+    config.tools = tools;
+  }
+
   console.log(`[API:${requestId}] Config: ${JSON.stringify(config)}`);
 
   // Make request to Gemini
@@ -108,7 +113,6 @@ export async function generateWithGemini(
       },
     ],
     config,
-    ...(tools.length > 0 && { tools }),
   });
 
   const geminiDuration = Date.now() - geminiStartTime;

@@ -24,6 +24,14 @@ export async function saveSession(session: LogSession): Promise<void> {
     return;
   }
 
+  // Guard against path traversal: sessionId is attacker-controllable and is
+  // interpolated into the output file path. Only allow a strict charset so a
+  // crafted id (e.g. "../../etc/foo") cannot escape the logs directory.
+  if (!/^[A-Za-z0-9_-]+$/.test(session.sessionId)) {
+    console.error(`[Logger] Rejecting invalid session id: ${session.sessionId}`);
+    return;
+  }
+
   const logsDir = path.join(process.cwd(), 'logs');
   const filename = `session-${session.sessionId}.json`;
   const filepath = path.join(logsDir, filename);

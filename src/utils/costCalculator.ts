@@ -1,4 +1,4 @@
-import { ModelType, Resolution, MODEL_DISPLAY_NAMES, NanoBananaNodeData, GenerateVideoNodeData, Generate3DNodeData, SplitGridNodeData, WorkflowNode, ProviderType } from "@/types";
+import { ModelType, Resolution, MODEL_DISPLAY_NAMES, NanoBananaNodeData, GenerateVideoNodeData, Generate3DNodeData, WorkflowNode, ProviderType } from "@/types";
 
 // Pricing in USD per image (Gemini API)
 export const PRICING = {
@@ -219,23 +219,9 @@ export function calculatePredictedCost(
       }
     }
 
-    // SplitGrid nodes create child nanoBanana nodes - count those from settings
-    // Note: child nodes are in the nodes array, but we count from splitGrid settings
-    // to show what WILL be generated when the grid runs
-    if (node.type === "splitGrid") {
-      const data = node.data as SplitGridNodeData;
-      if (data.isConfigured && data.targetCount > 0) {
-        const model = data.generateSettings.model;
-        const resolution = model === "nano-banana" ? "1K" : data.generateSettings.resolution;
-        const modelName = MODEL_DISPLAY_NAMES[model] || model;
-
-        const pricing = getPricing("gemini", model, resolution);
-        const unitCost = pricing?.unitCost ?? null;
-        const unit = pricing?.unit ?? "image";
-
-        addToBreakdown("gemini", model, modelName, unit, unitCost, data.targetCount);
-      }
-    }
+    // SplitGrid cell nodes are real nodes on the canvas (materialized from the
+    // cell template), so any generate nodes they contain are already counted
+    // above — no separate splitGrid estimate needed.
   });
 
   const breakdownArray = Array.from(breakdown.values());

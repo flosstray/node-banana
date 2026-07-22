@@ -77,7 +77,8 @@ async function applySpeedCurveCore(
   outputDuration: number,
   onProgress: ((progress: SpeedCurveProgress) => void) | undefined,
   easingFunction: EasingFunction | string,
-  bitrate: number
+  bitrate: number,
+  signal?: AbortSignal
 ): Promise<Blob> {
   let input: Input | null = null;
   let videoSource: VideoSampleSource | null = null;
@@ -332,6 +333,10 @@ async function applySpeedCurveCore(
     const samplesIterator = sink.samplesAtTimestamps(sourceTimestamps);
 
     for await (const sample of samplesIterator) {
+      if (signal?.aborted) {
+        if (sample) sample.close();
+        throw new DOMException("Aborted", "AbortError");
+      }
       if (!sample) {
         console.warn(`[SpeedCurve] Null sample at index ${emittedCount}, skipping`);
         emittedCount++;
@@ -418,7 +423,8 @@ export async function applySpeedCurveAsync(
   outputDuration: number = DEFAULT_OUTPUT_DURATION,
   onProgress?: (progress: SpeedCurveProgress) => void,
   easingFunction: EasingFunction | string = DEFAULT_EASING,
-  bitrate: number = DEFAULT_BITRATE
+  bitrate: number = DEFAULT_BITRATE,
+  signal?: AbortSignal
 ): Promise<Blob | null> {
   try {
     return await applySpeedCurveCore(
@@ -427,9 +433,13 @@ export async function applySpeedCurveAsync(
       outputDuration,
       onProgress,
       easingFunction,
-      bitrate
+      bitrate,
+      signal
     );
   } catch (error) {
+    // Re-throw cancellation so the executor treats Stop as idle rather than
+    // mapping a null return into a generic "no output" failure.
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Speed curve error:', error);
 

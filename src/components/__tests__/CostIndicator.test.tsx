@@ -387,46 +387,53 @@ describe("CostIndicator", () => {
   });
 
   describe("SplitGrid Nodes", () => {
-    it("should include splitGrid costs when configured", () => {
-      const nodes: WorkflowNode[] = [
-        {
-          id: "node-1",
-          type: "splitGrid",
-          position: { x: 0, y: 0 },
-          data: {
-            isConfigured: true,
-            targetCount: 4,
-            generateSettings: {
-              model: "nano-banana",
-              resolution: "1K",
-            },
-          },
+    // splitGrid nodes no longer contribute a cost line of their own: cell
+    // templates are materialized into real nodes on the canvas, so any
+    // generate nodes inside cells are counted directly.
+    const splitGridNode: WorkflowNode = {
+      id: "split-1",
+      type: "splitGrid",
+      position: { x: 0, y: 0 },
+      data: {
+        sourceImage: null,
+        gridRows: 2,
+        gridCols: 2,
+        // Legacy (deprecated) fields must not influence the estimate either
+        targetCount: 4,
+        defaultPrompt: "",
+        generateSettings: {
+          aspectRatio: "1:1",
+          resolution: "1K",
+          model: "nano-banana",
+          useGoogleSearch: false,
+          useImageSearch: false,
         },
-      ];
+        childNodeIds: [],
+        isConfigured: true,
+      },
+    } as WorkflowNode;
 
+    it("should not render for a workflow containing only splitGrid nodes", () => {
       mockUseWorkflowStore.mockImplementation((selector) => {
-        return selector(createDefaultState({ nodes }));
+        return selector(createDefaultState({ nodes: [splitGridNode] }));
       });
 
       render(<CostIndicator />);
 
-      // 4 * $0.039 = $0.156 = $0.16
-      expect(screen.getByText("$0.16")).toBeInTheDocument();
+      // splitGrid contributes no cost line, so there is nothing to show
+      expect(screen.queryByTitle("View cost details")).not.toBeInTheDocument();
     });
 
-    it("should not include unconfigured splitGrid costs", () => {
+    it("should ignore splitGrid nodes when summing costs from other nodes", () => {
       const nodes: WorkflowNode[] = [
+        splitGridNode,
         {
-          id: "node-1",
-          type: "splitGrid",
-          position: { x: 0, y: 0 },
+          id: "node-2",
+          type: "nanoBanana",
+          position: { x: 100, y: 0 },
           data: {
-            isConfigured: false,
-            targetCount: 0,
-            generateSettings: {
-              model: "nano-banana",
-              resolution: "1K",
-            },
+            model: "nano-banana",
+            resolution: "1K",
           },
         },
       ];
@@ -437,8 +444,9 @@ describe("CostIndicator", () => {
 
       render(<CostIndicator />);
 
-      // Should not render when no configured nodes
-      expect(screen.queryByTitle("View cost details")).not.toBeInTheDocument();
+      // Only the nanoBanana node counts: $0.039 = $0.04 (no legacy 4-cell
+      // splitGrid estimate of $0.156 added on top)
+      expect(screen.getByText("$0.04")).toBeInTheDocument();
     });
   });
 

@@ -244,11 +244,16 @@ describe("MultiSelectToolbar", () => {
 
       fireEvent.click(screen.getByTitle("Stack horizontally (H)"));
 
-      // First call should position node-2 (at x=100, so it comes first)
+      // A single batched call positions all nodes; node-2 (x=100) comes first
       expect(mockOnNodesChange).toHaveBeenCalledWith([
         expect.objectContaining({
           type: "position",
           id: "node-2",
+          position: expect.objectContaining({ y: 50 }), // Aligned to topmost y
+        }),
+        expect.objectContaining({
+          type: "position",
+          id: "node-1",
           position: expect.objectContaining({ y: 50 }), // Aligned to topmost y
         }),
       ]);
@@ -296,11 +301,16 @@ describe("MultiSelectToolbar", () => {
 
       fireEvent.click(screen.getByTitle("Stack vertically (V)"));
 
-      // First call should position node-2 (at y=100, so it comes first)
+      // A single batched call positions all nodes; node-2 (y=100) comes first
       expect(mockOnNodesChange).toHaveBeenCalledWith([
         expect.objectContaining({
           type: "position",
           id: "node-2",
+          position: expect.objectContaining({ x: 50 }), // Aligned to leftmost x
+        }),
+        expect.objectContaining({
+          type: "position",
+          id: "node-1",
           position: expect.objectContaining({ x: 50 }), // Aligned to leftmost x
         }),
       ]);

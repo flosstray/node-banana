@@ -46,6 +46,7 @@ const ALL_NODES_CATEGORIES: { label: string; nodes: { type: NodeType; label: str
       { type: "videoTrim", label: "Video Trim" },
       { type: "easeCurve", label: "Ease Curve" },
       { type: "videoFrameGrab", label: "Frame Grab" },
+      { type: "removeBackground", label: "Remove Background" },
       { type: "imageCompare", label: "Image Compare" },
     ],
   },
@@ -454,7 +455,8 @@ export function FloatingActionBar() {
       // Use mock execution for tutorial
       mockTutorialExecution();
     } else {
-      // Normal execution
+      // Normal execution. Resume-from-pause (pause edges) is handled inside
+      // executeWorkflow when no explicit start node is given.
       executeWorkflow();
     }
   }, [isRunning, stopWorkflow, executeWorkflow, mockTutorialExecution]);

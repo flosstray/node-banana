@@ -6,6 +6,7 @@
 
 import { GenerationInput, GenerationOutput } from "@/lib/providers/types";
 import { validateMediaUrl } from "@/utils/urlValidation";
+import { correctSvgContentType } from "@/utils/svgDetection";
 import {
   getParameterTypesFromSchema,
   coerceParameterTypes,
@@ -258,17 +259,8 @@ export async function generateWithReplicate(
     return { success: false, error: `Invalid media URL: ${mediaUrlCheck.error}` };
   }
 
-  console.log(`[API:${requestId}] Fetching output from: ${mediaUrl.substring(0, 80)}...`);
-  const mediaResponse = await fetch(mediaUrl);
-
-  if (!mediaResponse.ok) {
-    return {
-      success: false,
-      error: `Failed to fetch output: ${mediaResponse.status}`,
-    };
-  }
-
-  // Check if this is a 3D model — return URL directly (GLB files are binary)
+  // Check if this is a 3D model — return URL directly (GLB files are binary).
+  // Short-circuit before fetching so we never download the potentially large GLB binary.
   const is3DModel = input.model.capabilities.some(c => c.includes("3d"));
   if (is3DModel) {
     console.log(`[API:${requestId}] SUCCESS - Returning 3D model URL`);
@@ -284,14 +276,28 @@ export async function generateWithReplicate(
     };
   }
 
+  console.log(`[API:${requestId}] Fetching output from: ${mediaUrl.substring(0, 80)}...`);
+  const mediaResponse = await fetch(mediaUrl);
+
+  if (!mediaResponse.ok) {
+    return {
+      success: false,
+      error: `Failed to fetch output: ${mediaResponse.status}`,
+    };
+  }
+
   // Determine MIME type from response
-  const contentType = mediaResponse.headers.get("content-type") || "image/png";
+  let contentType = mediaResponse.headers.get("content-type") || "image/png";
   const isVideo = contentType.startsWith("video/");
   const isConcreteMedia = contentType.startsWith("audio/") || contentType.startsWith("video/") || contentType.startsWith("image/");
   const isAudio = contentType.startsWith("audio/") ||
     (!isConcreteMedia && input.model.capabilities.some(c => c.includes("audio")));
 
   const mediaArrayBuffer = await mediaResponse.arrayBuffer();
+
+  // Correct SVG outputs served with a generic content-type (e.g. octet-stream)
+  // so the resulting data URL renders as an image.
+  contentType = correctSvgContentType(contentType, mediaUrl, mediaArrayBuffer);
   const mediaSizeBytes = mediaArrayBuffer.byteLength;
   const mediaSizeMB = mediaSizeBytes / (1024 * 1024);
 

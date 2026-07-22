@@ -2,6 +2,7 @@ import {
   WorkflowSaveConfig,
   WorkflowCostData,
   ProviderSettings,
+  ProviderConfig,
   RecentModel,
   NodeDefaultsConfig,
   GenerateImageNodeDefaults,
@@ -53,6 +54,7 @@ export const defaultProviderSettings: ProviderSettings = {
     fal: { id: "fal", name: "fal.ai", enabled: false, apiKey: null, apiKeyEnvVar: "FAL_API_KEY" },
     kie: { id: "kie", name: "Kie.ai", enabled: false, apiKey: null, apiKeyEnvVar: "KIE_API_KEY" },
     wavespeed: { id: "wavespeed", name: "WaveSpeed", enabled: false, apiKey: null, apiKeyEnvVar: "WAVESPEED_API_KEY" },
+    reve: { id: "reve", name: "REVE", enabled: false, apiKey: null, apiKeyEnvVar: "REVE_API_KEY" },
   }
 };
 
@@ -128,13 +130,18 @@ export const getProviderSettings = (): ProviderSettings => {
   if (stored) {
     try {
       const parsed = JSON.parse(stored) as ProviderSettings;
-      // Merge with defaults to handle new providers added after user saved settings
-      return {
-        providers: {
-          ...defaultProviderSettings.providers,
-          ...parsed.providers,
+      // Deep-merge each provider with defaults so new fields/providers added after
+      // the user saved settings are preserved (shallow merge would drop them).
+      const mergedProviders = { ...defaultProviderSettings.providers } as Record<string, ProviderConfig>;
+      for (const [key, value] of Object.entries(parsed.providers)) {
+        if (value && typeof value === "object") {
+          mergedProviders[key] = {
+            ...(defaultProviderSettings.providers as Record<string, ProviderConfig>)[key],
+            ...value,
+          };
         }
-      };
+      }
+      return { providers: mergedProviders };
     } catch {
       return defaultProviderSettings;
     }

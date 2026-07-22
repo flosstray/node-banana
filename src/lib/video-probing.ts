@@ -39,14 +39,22 @@ export const probeVideoMetadata = async (blob: Blob): Promise<VideoMetadata> => 
       throw new Error('No video tracks found while probing dimensions.');
     }
     const track = videoTracks[0];
+    // Use CODED (pre-rotation) dimensions for encoder configuration. Decoded
+    // samples stay in coded orientation, and rotation is carried separately
+    // (re-applied as track metadata by the muxer). mediabunny's
+    // displayWidth/displayHeight are axis-swapped for 90/270 rotations, so
+    // relying on them would configure the encoder with transposed dimensions
+    // and produce squashed / wrong-orientation output for rotated (portrait
+    // phone) videos. For rotation 0/180, coded === display, so non-rotated
+    // videos are unaffected.
     const widthCandidate =
-      (typeof track.displayWidth === 'number' && track.displayWidth > 0
-        ? track.displayWidth
-        : track.codedWidth) ?? FALLBACK_WIDTH;
+      (typeof track.codedWidth === 'number' && track.codedWidth > 0
+        ? track.codedWidth
+        : track.displayWidth) ?? FALLBACK_WIDTH;
     const heightCandidate =
-      (typeof track.displayHeight === 'number' && track.displayHeight > 0
-        ? track.displayHeight
-        : track.codedHeight) ?? FALLBACK_HEIGHT;
+      (typeof track.codedHeight === 'number' && track.codedHeight > 0
+        ? track.codedHeight
+        : track.displayHeight) ?? FALLBACK_HEIGHT;
 
     let bitrate = 0;
     try {

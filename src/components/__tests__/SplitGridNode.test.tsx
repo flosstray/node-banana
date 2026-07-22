@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { SplitGridNode } from "@/components/nodes/SplitGridNode";
 import { ReactFlowProvider } from "@xyflow/react";
-import { SplitGridNodeData } from "@/types";
+import { SplitGridNode } from "@/components/nodes/SplitGridNode";
+import { SplitGridCell, SplitGridNodeData, WorkflowNode } from "@/types";
+import {
+  createDefaultSplitGridTemplate,
+  computeMaterializedKey,
+} from "@/store/utils/splitGridTemplate";
 
-// Mock the workflow store
+// Mock the workflow store (selector passthrough)
 const mockUpdateNodeData = vi.fn();
 const mockRegenerateNode = vi.fn();
 const mockUseWorkflowStore = vi.fn();
@@ -13,355 +17,455 @@ vi.mock("@/store/workflowStore", () => ({
   useWorkflowStore: (selector: (state: unknown) => unknown) => mockUseWorkflowStore(selector),
 }));
 
-// Mock useReactFlow
-vi.mock("@xyflow/react", async () => {
-  const actual = await vi.importActual("@xyflow/react");
-  return {
-    ...actual,
-    useReactFlow: () => ({
-      getNodes: vi.fn(() => []),
-      setNodes: vi.fn(),
-    }),
-  };
-});
-
-// Mock the SplitGridSettingsModal
-vi.mock("@/components/SplitGridSettingsModal", () => ({
-  SplitGridSettingsModal: ({ onClose }: { onClose: () => void }) => (
-    <div data-testid="split-grid-settings-modal">
+// Stub the template modal so its React Flow mini canvas never renders
+vi.mock("@/components/splitgrid/SplitGridTemplateModal", () => ({
+  SplitGridTemplateModal: ({ onClose }: { onClose: () => void }) => (
+    <div data-testid="split-grid-template-modal">
       <button onClick={onClose}>Close Modal</button>
     </div>
   ),
 }));
 
-// Wrapper component for React Flow context
-function TestWrapper({ children }: { children: React.ReactNode }) {
-  return <ReactFlowProvider>{children}</ReactFlowProvider>;
+// Pass the full-resolution source straight through (skips thumbnail generation)
+vi.mock("@/hooks/useAdaptiveImageSrc", () => ({
+  useAdaptiveImageSrc: (fullSrc: string | null | undefined) => fullSrc ?? null,
+}));
+
+const NODE_ID = "split-grid-node-1";
+const SOURCE_IMAGE = "data:image/png;base64,abc123";
+
+interface StoreStateOverrides {
+  isRunning?: boolean;
+  nodes?: Array<{ id: string }>;
+  edges?: Array<Record<string, unknown>>;
+  getConnectedInputs?: ReturnType<typeof vi.fn>;
 }
 
-describe("SplitGridNode", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    // Default mock implementation
-    mockUseWorkflowStore.mockImplementation((selector) => {
-      const state = {
-        updateNodeData: mockUpdateNodeData,
-        regenerateNode: mockRegenerateNode,
-        isRunning: false,
-        currentNodeIds: [],
-        groups: {},
-        nodes: [],
-        edges: [],
-        getConnectedInputs: vi.fn(() => ({ images: [], videos: [], audio: [], model3d: null, text: null, textItems: [], dynamicInputs: {}, easeCurve: null })),
-        getNodesWithComments: vi.fn(() => []),
-        markCommentViewed: vi.fn(),
-        setNavigationTarget: vi.fn(),
-      };
-      return selector(state);
-    });
-  });
+function setStoreState(overrides: StoreStateOverrides = {}) {
+  const state = {
+    updateNodeData: mockUpdateNodeData,
+    regenerateNode: mockRegenerateNode,
+    isRunning: false,
+    currentNodeIds: [] as string[],
+    setHoveredNodeId: vi.fn(),
+    nodes: [] as Array<{ id: string }>,
+    edges: [] as Array<Record<string, unknown>>,
+    getConnectedInputs: vi.fn(() => ({ images: [] as string[], text: null })),
+    ...overrides,
+  };
+  mockUseWorkflowStore.mockImplementation((selector: (s: typeof state) => unknown) =>
+    selector(state)
+  );
+}
 
-  const createDefaultNodeData = (overrides: Partial<SplitGridNodeData> = {}): SplitGridNodeData => ({
+/** Store overrides simulating an upstream image connected to this node's image handle. */
+function connectedImageState(image: string): StoreStateOverrides {
+  return {
+    edges: [{ id: "edge-img", source: "upstream-1", target: NODE_ID, targetHandle: "image" }],
+    getConnectedInputs: vi.fn(() => ({ images: [image], text: null })),
+  };
+}
+
+function createNodeData(overrides: Partial<SplitGridNodeData> = {}): SplitGridNodeData {
+  return {
     sourceImage: null,
-    targetCount: 4,
+    gridRows: 2,
+    gridCols: 3,
+    targetCount: 6,
     defaultPrompt: "",
     generateSettings: {
       aspectRatio: "1:1",
       resolution: "1K",
       model: "nano-banana",
       useGoogleSearch: false,
+      useImageSearch: false,
     },
     childNodeIds: [],
-    gridRows: 2,
-    gridCols: 2,
     isConfigured: false,
     status: "idle",
     error: null,
     ...overrides,
+  };
+}
+
+/**
+ * Freshly materialized data: cells matching rows*cols, a materializedKey
+ * matching the current config, and the store nodes backing each cell.
+ */
+function materialized(rows: number, cols: number) {
+  const template = createDefaultSplitGridTemplate();
+  const cells: SplitGridCell[] = Array.from({ length: rows * cols }, (_, index) => ({
+    baseImageNodeId: `cell-img-${index}`,
+    nodeIds: [`cell-img-${index}`],
+    groupId: `group-${index}`,
+  }));
+  return {
+    data: {
+      gridRows: rows,
+      gridCols: cols,
+      template,
+      cells,
+      materializedKey: computeMaterializedKey(rows, cols, template),
+    } satisfies Partial<SplitGridNodeData>,
+    storeNodes: cells.map((cell) => ({ id: cell.baseImageNodeId })) as WorkflowNode[],
+  };
+}
+
+function renderNode(dataOverrides: Partial<SplitGridNodeData> = {}) {
+  return render(
+    <ReactFlowProvider>
+      <SplitGridNode
+        id={NODE_ID}
+        type="splitGrid"
+        data={createNodeData(dataOverrides)}
+        selected={false}
+        isConnectable={true}
+        positionAbsoluteX={0}
+        positionAbsoluteY={0}
+        zIndex={0}
+        dragging={false}
+        deletable={true}
+        selectable={true}
+        draggable={true}
+        parentId={undefined}
+        dragHandle={undefined}
+      />
+    </ReactFlowProvider>
+  );
+}
+
+describe("SplitGridNode", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setStoreState();
   });
 
-  const createNodeProps = (data: Partial<SplitGridNodeData> = {}) => ({
-    id: "split-grid-node-1",
-    type: "splitGrid" as const,
-    data: createDefaultNodeData(data),
-    selected: false,
-  });
-
-  describe("Basic Rendering", () => {
-    it("should render input handle for image", () => {
-      const { container } = render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps()} />
-        </TestWrapper>
-      );
-
-      const imageHandle = container.querySelector('[data-handletype="image"]');
-      expect(imageHandle).toBeInTheDocument();
+  describe("Handles", () => {
+    it("renders an image input handle", () => {
+      const { container } = renderNode();
+      expect(container.querySelector('[data-handletype="image"]')).toBeInTheDocument();
     });
 
-    it("should render output handle for reference", () => {
-      const { container } = render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps()} />
-        </TestWrapper>
-      );
-
-      const referenceHandle = container.querySelector('[data-handletype="reference"]');
-      expect(referenceHandle).toBeInTheDocument();
-    });
-
-    it("should render grid configuration summary", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ gridRows: 2, gridCols: 3, targetCount: 6 })} />
-        </TestWrapper>
-      );
-
-      expect(screen.getByText("2x3 grid (6 images)")).toBeInTheDocument();
+    it("renders a reference output handle", () => {
+      const { container } = renderNode();
+      expect(container.querySelector('[data-handletype="reference"]')).toBeInTheDocument();
     });
   });
 
-  describe("Empty State", () => {
-    it("should show 'Connect image' message when no source image", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ sourceImage: null })} />
-        </TestWrapper>
-      );
+  describe("Grid dimension fields", () => {
+    it("renders rows and columns fields with current values", () => {
+      renderNode({ gridRows: 2, gridCols: 3 });
 
-      expect(screen.getByText("Connect image")).toBeInTheDocument();
+      expect(screen.getByLabelText("Rows")).toHaveValue("2");
+      expect(screen.getByLabelText("Columns")).toHaveValue("3");
     });
 
-    it("should show unconfigured warning when not configured", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ isConfigured: false })} />
-        </TestWrapper>
-      );
+    it("increments rows via the increase button", () => {
+      renderNode({ gridRows: 2 });
 
-      expect(screen.getByText("Not configured - click Settings")).toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText("Increase rows"));
+
+      expect(mockUpdateNodeData).toHaveBeenCalledWith(NODE_ID, { gridRows: 3 });
+    });
+
+    it("decrements rows via the decrease button", () => {
+      renderNode({ gridRows: 2 });
+
+      fireEvent.click(screen.getByLabelText("Decrease rows"));
+
+      expect(mockUpdateNodeData).toHaveBeenCalledWith(NODE_ID, { gridRows: 1 });
+    });
+
+    it("increments columns via the increase button", () => {
+      renderNode({ gridCols: 3 });
+
+      fireEvent.click(screen.getByLabelText("Increase columns"));
+
+      expect(mockUpdateNodeData).toHaveBeenCalledWith(NODE_ID, { gridCols: 4 });
+    });
+
+    it("disables the decrease button at the minimum of 1", () => {
+      renderNode({ gridRows: 1 });
+
+      expect(screen.getByLabelText("Decrease rows")).toBeDisabled();
+    });
+
+    it("disables the increase button at the maximum of 8", () => {
+      renderNode({ gridRows: 8 });
+
+      expect(screen.getByLabelText("Increase rows")).toBeDisabled();
+    });
+
+    it("commits a typed value on blur", () => {
+      renderNode({ gridRows: 2 });
+
+      const input = screen.getByLabelText("Rows");
+      fireEvent.change(input, { target: { value: "5" } });
+      fireEvent.blur(input);
+
+      expect(mockUpdateNodeData).toHaveBeenCalledWith(NODE_ID, { gridRows: 5 });
+    });
+
+    it("clamps typed values above the maximum to 8", () => {
+      renderNode({ gridRows: 2 });
+
+      const input = screen.getByLabelText("Rows");
+      fireEvent.change(input, { target: { value: "99" } });
+      fireEvent.blur(input);
+
+      expect(mockUpdateNodeData).toHaveBeenCalledWith(NODE_ID, { gridRows: 8 });
+    });
+
+    it("clamps typed values below the minimum to 1", () => {
+      renderNode({ gridCols: 3 });
+
+      const input = screen.getByLabelText("Columns");
+      fireEvent.change(input, { target: { value: "0" } });
+      fireEvent.blur(input);
+
+      expect(mockUpdateNodeData).toHaveBeenCalledWith(NODE_ID, { gridCols: 1 });
+    });
+
+    it("does not commit non-numeric input", () => {
+      renderNode({ gridRows: 2 });
+
+      const input = screen.getByLabelText("Rows");
+      fireEvent.change(input, { target: { value: "abc" } });
+      fireEvent.blur(input);
+
+      expect(mockUpdateNodeData).not.toHaveBeenCalled();
+    });
+
+    it("commits on Enter by blurring the field", () => {
+      renderNode({ gridRows: 2 });
+
+      const input = screen.getByLabelText("Rows") as HTMLInputElement;
+      input.focus();
+      fireEvent.change(input, { target: { value: "4" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+
+      expect(mockUpdateNodeData).toHaveBeenCalledWith(NODE_ID, { gridRows: 4 });
+    });
+
+    it("disables the fields while the workflow is running", () => {
+      setStoreState({ isRunning: true });
+      renderNode();
+
+      expect(screen.getByLabelText("Rows")).toBeDisabled();
+      expect(screen.getByLabelText("Columns")).toBeDisabled();
+      expect(screen.getByLabelText("Increase rows")).toBeDisabled();
     });
   });
 
-  describe("Source Image Display", () => {
-    it("should display source image when provided", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ sourceImage: "data:image/png;base64,abc123" })} />
-        </TestWrapper>
-      );
+  describe("Cell nodes button", () => {
+    it("opens the template modal when clicked", () => {
+      renderNode();
+
+      expect(screen.queryByTestId("split-grid-template-modal")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: /cell nodes/i }));
+
+      expect(screen.getByTestId("split-grid-template-modal")).toBeInTheDocument();
+    });
+
+    it("closes the template modal via onClose", () => {
+      renderNode();
+
+      fireEvent.click(screen.getByRole("button", { name: /cell nodes/i }));
+      expect(screen.getByTestId("split-grid-template-modal")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByText("Close Modal"));
+
+      expect(screen.queryByTestId("split-grid-template-modal")).not.toBeInTheDocument();
+    });
+
+    it("does not auto-open the modal on mount", () => {
+      renderNode({ isConfigured: false, childNodeIds: [] });
+
+      expect(screen.queryByTestId("split-grid-template-modal")).not.toBeInTheDocument();
+    });
+
+    it("shows the template node count per cell", () => {
+      // Default template is image-only: 1 node per cell
+      renderNode();
+
+      expect(screen.getByText("1 / cell")).toBeInTheDocument();
+    });
+  });
+
+  describe("Split button", () => {
+    it("is labeled with the current grid dimensions", () => {
+      renderNode({ gridRows: 2, gridCols: 3 });
+
+      expect(screen.getByRole("button", { name: "Split 2×3" })).toBeInTheDocument();
+    });
+
+    it("is disabled when there is no source image", () => {
+      renderNode({ sourceImage: null });
+
+      expect(screen.getByRole("button", { name: "Split 2×3" })).toBeDisabled();
+    });
+
+    it("is disabled while the workflow is running", () => {
+      setStoreState({ isRunning: true, ...connectedImageState(SOURCE_IMAGE) });
+      renderNode({ sourceImage: SOURCE_IMAGE });
+
+      expect(screen.getByRole("button", { name: "Split 2×3" })).toBeDisabled();
+    });
+
+    it("calls regenerateNode when clicked with a source image", () => {
+      setStoreState(connectedImageState(SOURCE_IMAGE));
+      renderNode({ sourceImage: SOURCE_IMAGE });
+
+      const splitButton = screen.getByRole("button", { name: "Split 2×3" });
+      expect(splitButton).toBeEnabled();
+
+      fireEvent.click(splitButton);
+
+      expect(mockRegenerateNode).toHaveBeenCalledWith(NODE_ID);
+    });
+  });
+
+  describe("Preview", () => {
+    it("shows the source image when set", () => {
+      setStoreState(connectedImageState(SOURCE_IMAGE));
+      renderNode({ sourceImage: SOURCE_IMAGE });
 
       const img = screen.getByAltText("Source grid");
       expect(img).toBeInTheDocument();
-      expect(img).toHaveAttribute("src", "data:image/png;base64,abc123");
+      expect(img).toHaveAttribute("src", SOURCE_IMAGE);
     });
 
-    it("should show grid overlay on source image", () => {
-      const { container } = render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({
-            sourceImage: "data:image/png;base64,abc123",
-            gridRows: 2,
-            gridCols: 2,
-            targetCount: 4
-          })} />
-        </TestWrapper>
-      );
+    it("overlays one grid cell per rows x cols", () => {
+      setStoreState(connectedImageState(SOURCE_IMAGE));
+      const { container } = renderNode({ sourceImage: SOURCE_IMAGE, gridRows: 2, gridCols: 3 });
 
-      // Check for grid overlay cells
       const gridCells = container.querySelectorAll(".border.border-blue-400\\/50");
-      expect(gridCells.length).toBe(4);
+      expect(gridCells.length).toBe(6);
+    });
+
+    it("shows the connect-image placeholder when no source image", () => {
+      renderNode({ sourceImage: null });
+
+      expect(screen.getByText("Connect image")).toBeInTheDocument();
+      expect(screen.queryByAltText("Source grid")).not.toBeInTheDocument();
     });
   });
 
-  describe("Settings Modal", () => {
-    it("should open settings modal when Settings button is clicked", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps()} />
-        </TestWrapper>
-      );
+  describe("Loading state", () => {
+    it("shows a spinner overlay while loading", () => {
+      setStoreState(connectedImageState(SOURCE_IMAGE));
+      const { container } = renderNode({ sourceImage: SOURCE_IMAGE, status: "loading" });
 
-      const settingsButton = screen.getByText("Settings");
-      fireEvent.click(settingsButton);
-
-      expect(screen.getByTestId("split-grid-settings-modal")).toBeInTheDocument();
+      expect(container.querySelector(".animate-spin")).toBeInTheDocument();
+      expect(container.querySelector(".bg-neutral-900\\/70")).toBeInTheDocument();
     });
 
-    it("should close settings modal when onClose is called", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps()} />
-        </TestWrapper>
-      );
+    it("does not show the spinner when idle", () => {
+      const { container } = renderNode({ status: "idle" });
 
-      // Open modal
-      const settingsButton = screen.getByText("Settings");
-      fireEvent.click(settingsButton);
-
-      expect(screen.getByTestId("split-grid-settings-modal")).toBeInTheDocument();
-
-      // Close modal
-      const closeButton = screen.getByText("Close Modal");
-      fireEvent.click(closeButton);
-
-      expect(screen.queryByTestId("split-grid-settings-modal")).not.toBeInTheDocument();
-    });
-
-    it("should auto-open settings when not configured and no child nodes", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ isConfigured: false, childNodeIds: [] })} />
-        </TestWrapper>
-      );
-
-      // Modal should be open automatically
-      expect(screen.getByTestId("split-grid-settings-modal")).toBeInTheDocument();
-    });
-
-    it("should not auto-open settings when already configured", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ isConfigured: true })} />
-        </TestWrapper>
-      );
-
-      // Modal should not be open
-      expect(screen.queryByTestId("split-grid-settings-modal")).not.toBeInTheDocument();
+      expect(container.querySelector(".animate-spin")).not.toBeInTheDocument();
     });
   });
 
-  describe("Split Button", () => {
-    it("should render Split button", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ isConfigured: true })} />
-        </TestWrapper>
-      );
-
-      expect(screen.getByText("Split")).toBeInTheDocument();
-    });
-
-    it("should call regenerateNode when Split button is clicked", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ isConfigured: true, sourceImage: "data:image/png;base64,abc123" })} />
-        </TestWrapper>
-      );
-
-      const splitButton = screen.getByText("Split");
-      fireEvent.click(splitButton);
-
-      expect(mockRegenerateNode).toHaveBeenCalledWith("split-grid-node-1");
-    });
-
-    it("should disable Split button when not configured", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ isConfigured: false })} />
-        </TestWrapper>
-      );
-
-      const splitButton = screen.getByText("Split");
-      expect(splitButton).toBeDisabled();
-    });
-
-    it("should disable Split button when workflow is running", () => {
-      mockUseWorkflowStore.mockImplementation((selector) => {
-        const state = {
-          updateNodeData: mockUpdateNodeData,
-          regenerateNode: mockRegenerateNode,
-          isRunning: true,
-          currentNodeIds: [],
-          groups: {},
-          nodes: [],
-          edges: [],
-          getConnectedInputs: vi.fn(() => ({ images: [], videos: [], audio: [], model3d: null, text: null, textItems: [], dynamicInputs: {}, easeCurve: null })),
-          getNodesWithComments: vi.fn(() => []),
-          markCommentViewed: vi.fn(),
-          setNavigationTarget: vi.fn(),
-        };
-        return selector(state);
-      });
-
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ isConfigured: true })} />
-        </TestWrapper>
-      );
-
-      const splitButton = screen.getByText("Split");
-      expect(splitButton).toBeDisabled();
-    });
-  });
-
-  describe("Child Node Count", () => {
-    it("should display child node count when configured", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({
-            isConfigured: true,
-            childNodeIds: [
-              { imageInput: "1", prompt: "2", nanoBanana: "3" },
-              { imageInput: "4", prompt: "5", nanoBanana: "6" },
-              { imageInput: "7", prompt: "8", nanoBanana: "9" },
-            ]
-          })} />
-        </TestWrapper>
-      );
-
-      expect(screen.getByText("3 generate sets created")).toBeInTheDocument();
-    });
-  });
-
-  describe("Loading State", () => {
-    it("should show loading spinner when status is loading", () => {
-      const { container } = render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ status: "loading" })} />
-        </TestWrapper>
-      );
-
-      const spinner = container.querySelector(".animate-spin");
-      expect(spinner).toBeInTheDocument();
-    });
-
-    it("should show loading overlay on source image when loading", () => {
-      const { container } = render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({
-            sourceImage: "data:image/png;base64,abc",
-            status: "loading"
-          })} />
-        </TestWrapper>
-      );
-
-      // Check for loading overlay
-      const overlay = container.querySelector(".bg-neutral-900\\/70");
-      expect(overlay).toBeInTheDocument();
-    });
-  });
-
-  describe("Error State", () => {
-    it("should show error message when status is error", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ status: "error", error: "Something went wrong" })} />
-        </TestWrapper>
-      );
+  describe("Error state", () => {
+    it("shows the error message when status is error", () => {
+      renderNode({ status: "error", error: "Something went wrong" });
 
       expect(screen.getByText("Something went wrong")).toBeInTheDocument();
     });
 
-    it("should show default error message when error is null", () => {
-      render(
-        <TestWrapper>
-          <SplitGridNode {...createNodeProps({ status: "error", error: null })} />
-        </TestWrapper>
-      );
+    it("shows a default error message when error is null", () => {
+      renderNode({ status: "error", error: null });
 
       expect(screen.getByText("Error")).toBeInTheDocument();
     });
   });
 
+  describe("Status text", () => {
+    it("prompts to split when no cells exist", () => {
+      renderNode();
+
+      expect(screen.getByText("Split creates a group per cell")).toBeInTheDocument();
+    });
+
+    it("shows the cell group count when cells match the current config", () => {
+      const { data, storeNodes } = materialized(2, 3);
+      setStoreState({ nodes: storeNodes });
+      renderNode(data);
+
+      expect(screen.getByText("6 cell groups")).toBeInTheDocument();
+    });
+
+    it("uses the singular form for a single cell", () => {
+      const { data, storeNodes } = materialized(1, 1);
+      setStoreState({ nodes: storeNodes });
+      renderNode(data);
+
+      expect(screen.getByText("1 cell group")).toBeInTheDocument();
+    });
+
+    it("shows the stale hint when the materialized key no longer matches", () => {
+      const { data, storeNodes } = materialized(2, 3);
+      setStoreState({ nodes: storeNodes });
+      renderNode({ ...data, materializedKey: "stale-key" });
+
+      expect(screen.getByText("Cells out of date — Split rebuilds")).toBeInTheDocument();
+    });
+
+    it("shows the stale hint when grid dimensions changed after materialization", () => {
+      const { data, storeNodes } = materialized(2, 3);
+      setStoreState({ nodes: storeNodes });
+      // Key was computed for 2x3; rows changed to 3 afterwards
+      renderNode({ ...data, gridRows: 3 });
+
+      expect(screen.getByText("Cells out of date — Split rebuilds")).toBeInTheDocument();
+    });
+
+    it("does not mark cells stale when a single base node was deleted (intentional pruning)", () => {
+      const { data, storeNodes } = materialized(2, 3);
+      setStoreState({ nodes: storeNodes.slice(1) });
+      renderNode(data);
+
+      expect(screen.queryByText("Cells out of date — Split rebuilds")).not.toBeInTheDocument();
+      expect(screen.getByText("6 cell groups")).toBeInTheDocument();
+    });
+
+    it("shows the stale hint when every cell's base node is gone", () => {
+      const { data } = materialized(2, 3);
+      setStoreState({ nodes: [] });
+      renderNode(data);
+
+      expect(screen.getByText("Cells out of date — Split rebuilds")).toBeInTheDocument();
+    });
+
+    it("counts legacy childNodeIds cells matching the grid without marking them stale", () => {
+      renderNode({
+        gridRows: 1,
+        gridCols: 3,
+        childNodeIds: [
+          { imageInput: "img-1", prompt: "p-1", nanoBanana: "gen-1" },
+          { imageInput: "img-2", prompt: "p-2", nanoBanana: "gen-2" },
+          { imageInput: "img-3", prompt: "p-3", nanoBanana: "gen-3" },
+        ],
+      });
+
+      expect(screen.getByText("3 cell groups")).toBeInTheDocument();
+      expect(screen.queryByText("Cells out of date — Split rebuilds")).not.toBeInTheDocument();
+    });
+
+    it("marks legacy cells stale when rows/cols no longer match the child count", () => {
+      renderNode({
+        gridRows: 2,
+        gridCols: 3,
+        childNodeIds: [
+          { imageInput: "img-1", prompt: "p-1", nanoBanana: "gen-1" },
+          { imageInput: "img-2", prompt: "p-2", nanoBanana: "gen-2" },
+          { imageInput: "img-3", prompt: "p-3", nanoBanana: "gen-3" },
+        ],
+      });
+
+      expect(screen.getByText("Cells out of date — Split rebuilds")).toBeInTheDocument();
+    });
+  });
 });

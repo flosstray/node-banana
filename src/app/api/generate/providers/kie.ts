@@ -388,110 +388,6 @@ export async function uploadMediaToKie(
 /** @deprecated Use uploadMediaToKie instead */
 export const uploadImageToKie = uploadMediaToKie;
 
-/**
- * Poll Kie.ai task status until completion
- */
-export async function pollKieTaskCompletion(
-  requestId: string,
-  apiKey: string,
-  taskId: string,
-): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {
-  const maxWaitTime = 10 * 60 * 1000; // 10 minutes for video
-  let pollInterval = 2000; // start at 2s
-  const maxInterval = 10000; // cap at 10s
-  const startTime = Date.now();
-  let lastStatus = "";
-  let consecutiveErrors = 0;
-  const maxConsecutiveErrors = 5;
-
-  const pollUrl = `https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`;
-
-  while (true) {
-    if (Date.now() - startTime > maxWaitTime) {
-      return { success: false, error: "Generation timed out after 10 minutes" };
-    }
-
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
-
-    let response: Response;
-    try {
-      response = await fetch(pollUrl, {
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-        },
-      });
-    } catch (err) {
-      consecutiveErrors++;
-      console.warn(`[API:${requestId}] Kie poll network error (${consecutiveErrors}/${maxConsecutiveErrors}):`, err);
-      if (consecutiveErrors >= maxConsecutiveErrors) {
-        return { success: false, error: `Polling failed after ${maxConsecutiveErrors} consecutive network errors` };
-      }
-      pollInterval = Math.min(pollInterval + 1000, maxInterval);
-      continue;
-    }
-
-    if (!response.ok) {
-      // 404/422 = task not registered yet, 429 = rate limited, 5xx = server error — all transient
-      if (response.status === 404 || response.status === 422 || response.status === 429 || response.status >= 500) {
-        consecutiveErrors++;
-        console.log(`[API:${requestId}] Kie poll returned ${response.status} (${consecutiveErrors}/${maxConsecutiveErrors}) — retrying`);
-        if (consecutiveErrors >= maxConsecutiveErrors) {
-          return { success: false, error: `Polling failed after ${maxConsecutiveErrors} consecutive HTTP ${response.status} errors` };
-        }
-        pollInterval = Math.min(pollInterval + 1000, maxInterval);
-        continue;
-      }
-      return { success: false, error: `Failed to poll status: ${response.status}` };
-    }
-
-    let result: Record<string, unknown>;
-    try {
-      result = await response.json();
-    } catch (err) {
-      consecutiveErrors++;
-      console.warn(`[API:${requestId}] Kie poll JSON parse error (${consecutiveErrors}/${maxConsecutiveErrors}):`, err);
-      if (consecutiveErrors >= maxConsecutiveErrors) {
-        return { success: false, error: `Polling failed after ${maxConsecutiveErrors} consecutive parse errors` };
-      }
-      pollInterval = Math.min(pollInterval + 1000, maxInterval);
-      continue;
-    }
-
-    // Reset on any successful poll response
-    consecutiveErrors = 0;
-
-    // Kie API can return HTTP 200 with code != 200 (e.g. "recordInfo is null")
-    if (result.code && result.code !== 200) {
-      console.log(`[API:${requestId}] Kie poll returned code ${result.code}: ${(result as Record<string, unknown>).msg || ""} — retrying`);
-      pollInterval = Math.min(pollInterval + 1000, maxInterval);
-      continue;
-    }
-
-    // Kie API returns "state" in result.data.state (not "status")
-    const data = result.data as Record<string, unknown> | undefined;
-    const state = ((data?.state || result.state || result.status || "") as string).toUpperCase();
-
-    if (state !== lastStatus) {
-      console.log(`[API:${requestId}] Kie task state: ${state}`);
-      lastStatus = state;
-    }
-
-    if (state === "SUCCESS" || state === "COMPLETED") {
-      return { success: true, data: data || result };
-    }
-
-    if (state === "FAIL" || state === "FAILED" || state === "ERROR") {
-      console.error(`[API:${requestId}] Kie task failed. Full response:`, JSON.stringify(result).substring(0, 1000));
-      const errorMessage = data?.failMsg || data?.errorMessage || result.error || result.message || "Generation failed";
-      return { success: false, error: errorMessage as string };
-    }
-
-    // Continue polling for: WAITING, QUEUING, GENERATING, PROCESSING, etc.
-    pollInterval = Math.min(pollInterval + 1000, maxInterval);
-  }
-}
-
-
 // Map internal model IDs to the API model value expected by Kie
 // Seedance models use a base ID without the capability suffix
 function getKieApiModelId(modelId: string): string {
@@ -507,50 +403,6 @@ export function isVeoModel(modelId: string): boolean {
 export function getVeoApiModelId(modelId: string): string {
   if (modelId.startsWith("veo3-fast/")) return "veo3_fast";
   return "veo3";
-}
-
-export async function pollVeoTaskCompletion(
-  requestId: string,
-  apiKey: string,
-  taskId: string,
-): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {
-  const maxWaitTime = 10 * 60 * 1000;
-  const pollInterval = 2000;
-  const startTime = Date.now();
-  let lastStatus = -1;
-
-  const pollUrl = `https://api.kie.ai/api/v1/veo/record-info?taskId=${encodeURIComponent(taskId)}`;
-
-  while (true) {
-    if (Date.now() - startTime > maxWaitTime) {
-      return { success: false, error: "Generation timed out after 10 minutes" };
-    }
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
-
-    const response = await fetch(pollUrl, {
-      headers: { "Authorization": `Bearer ${apiKey}` },
-    });
-    if (!response.ok) {
-      return { success: false, error: `Failed to poll status: ${response.status}` };
-    }
-
-    const result = await response.json();
-    const successFlag = result.data?.successFlag ?? -1;
-
-    if (successFlag !== lastStatus) {
-      console.log(`[API:${requestId}] Veo task successFlag: ${successFlag}`);
-      lastStatus = successFlag;
-    }
-
-    if (successFlag === 1) {
-      return { success: true, data: result.data };
-    }
-    if (successFlag === 2 || successFlag === 3) {
-      const errorMessage = result.data?.errorMessage || "Generation failed";
-      return { success: false, error: errorMessage };
-    }
-    // successFlag === 0 means still generating, continue polling
-  }
 }
 
 /**
@@ -598,17 +450,18 @@ export async function submitKieTask(
           }
           handledImageKeys.add(key);
         } else if (Array.isArray(value)) {
-          const processedArray: string[] = [];
-          for (const item of value) {
-            if (typeof item === 'string' && item.startsWith('data:')) {
-              const url = await uploadMediaToKie(requestId, apiKey, item);
-              processedArray.push(url);
-            } else if (typeof item === 'string' && item.startsWith('http')) {
-              processedArray.push(item);
-            } else if (typeof item === 'string') {
-              processedArray.push(item);
-            }
-          }
+          const processedArray = (
+            await Promise.all(
+              value.map(async (item) => {
+                if (typeof item === 'string' && item.startsWith('data:')) {
+                  return await uploadMediaToKie(requestId, apiKey, item);
+                } else if (typeof item === 'string') {
+                  return item;
+                }
+                return null;
+              })
+            )
+          ).filter((item): item is string => item !== null);
           if (processedArray.length > 0) {
             if (key === "image_url" || key === "video_url" || key === "tail_image_url" || key === "first_frame_url" || key === "last_frame_url" || key === "first_clip_url") {
               inputParams[key] = processedArray[0];
@@ -630,15 +483,13 @@ export async function submitKieTask(
   // treat these fields as mutually exclusive and reject the request.
   const imageKey = getKieImageInputKey(modelId);
   if (input.images && input.images.length > 0 && handledImageKeys.size === 0) {
-    const imageUrls: string[] = [];
-    for (const image of input.images) {
-      if (image.startsWith("http")) {
-        imageUrls.push(image);
-      } else {
-        const url = await uploadMediaToKie(requestId, apiKey, image);
-        imageUrls.push(url);
-      }
-    }
+    const imageUrls = await Promise.all(
+      input.images.map(async (image) =>
+        image.startsWith("http")
+          ? image
+          : await uploadMediaToKie(requestId, apiKey, image)
+      )
+    );
 
     if (imageKey === "image_url" || imageKey === "video_url" || imageKey === "first_frame_url" || imageKey === "last_frame_url" || imageKey === "first_clip_url") {
       inputParams[imageKey] = imageUrls[0];
@@ -1084,42 +935,4 @@ export async function fetchKieMediaResult(
       },
     ],
   };
-}
-
-/**
- * Generate image/video using Kie.ai API
- * Composes submitKieTask + polling + fetchKieMediaResult for backward compatibility.
- */
-export async function generateWithKie(
-  requestId: string,
-  apiKey: string,
-  input: GenerationInput
-): Promise<GenerationOutput> {
-  try {
-    const { taskId, isVeo } = await submitKieTask(requestId, apiKey, input);
-
-    // Poll for completion using existing polling functions
-    const pollResult = isVeo
-      ? await pollVeoTaskCompletion(requestId, apiKey, taskId)
-      : await pollKieTaskCompletion(requestId, apiKey, taskId);
-
-    if (!pollResult.success) {
-      return {
-        success: false,
-        error: `${input.model.name}: ${pollResult.error}`,
-      };
-    }
-
-    return await fetchKieMediaResult(requestId, {
-      pollData: pollResult.data!,
-      isVeo,
-      modelName: input.model.name,
-      capabilities: input.model.capabilities,
-    });
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Generation failed",
-    };
-  }
 }

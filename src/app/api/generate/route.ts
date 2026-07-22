@@ -15,12 +15,12 @@ import { GenerateRequest, GenerateResponse, ModelType, SelectedModel, ProviderTy
 import { GenerationInput, ModelCapability } from "@/lib/providers/types";
 import { generateWithGemini, generateWithGeminiVideo } from "./providers/gemini";
 import { generateWithReplicate } from "./providers/replicate";
-import { clearFalInputMappingCache as _clearFalInputMappingCache, generateWithFalQueue } from "./providers/fal";
+import { generateWithFalQueue } from "./providers/fal";
 import { submitKieTask } from "./providers/kie";
 import { generateWithWaveSpeed } from "./providers/wavespeed";
-
-// Re-export for backward compatibility (test file imports from route)
-export const clearFalInputMappingCache = _clearFalInputMappingCache;
+import { generateWithOpenAI } from "./providers/openai";
+import { generateWithReve } from "./providers/reve";
+import { buildMediaResponse } from "./shared";
 
 export const maxDuration = 600; // 10 minute timeout for video generation polling
 export const dynamic = 'force-dynamic'; // Ensure this route is always dynamic
@@ -36,42 +36,6 @@ interface MultiProviderGenerateRequest extends GenerateRequest {
   dynamicInputs?: Record<string, string | string[]>;
 }
 
-
-export function buildMediaResponse(output: { type: string; data: string; url?: string }): NextResponse {
-  if (output.type === "3d") {
-    return NextResponse.json<GenerateResponse>({
-      success: true,
-      model3dUrl: output.url,
-      contentType: "3d",
-    });
-  }
-
-  if (output.type === "video") {
-    const isLarge = !output.data && output.url;
-    return NextResponse.json<GenerateResponse>({
-      success: true,
-      video: isLarge ? undefined : output.data,
-      videoUrl: isLarge ? output.url : undefined,
-      contentType: "video",
-    });
-  }
-
-  if (output.type === "audio") {
-    const isLarge = !output.data && output.url;
-    return NextResponse.json<GenerateResponse>({
-      success: true,
-      audio: isLarge ? undefined : output.data,
-      audioUrl: isLarge ? output.url : undefined,
-      contentType: "audio",
-    });
-  }
-
-  return NextResponse.json<GenerateResponse>({
-    success: true,
-    image: output.data,
-    contentType: "image",
-  });
-}
 
 function capabilitiesForMediaType(mediaType?: string): ModelCapability[] {
   const map: Record<string, ModelCapability[]> = {
@@ -106,6 +70,7 @@ export async function POST(request: NextRequest) {
     // - Provided via dynamicInputs
     // - Images are provided (image-to-video/image-to-image models)
     // - Dynamic inputs contain image frames (first_frame, last_frame, etc.)
+    // - Dynamic inputs contain a video (video-to-video upscalers/restorers) or audio
     const hasPrompt = prompt || (dynamicInputs && (
       typeof dynamicInputs.prompt === 'string'
         ? dynamicInputs.prompt
@@ -115,12 +80,19 @@ export async function POST(request: NextRequest) {
     const hasImageInputs = dynamicInputs && Object.keys(dynamicInputs).some(key =>
       key.includes('frame') || key.includes('image')
     );
+    const hasMediaInputs = dynamicInputs && Object.entries(dynamicInputs).some(([key, value]) =>
+      (key.includes('video') || key.includes('audio')) &&
+      (
+        (typeof value === 'string' && value.trim().length > 0) ||
+        (Array.isArray(value) && value.some((v) => typeof v === 'string' && v.trim().length > 0))
+      )
+    );
 
-    if (!hasPrompt && !hasImages && !hasImageInputs) {
+    if (!hasPrompt && !hasImages && !hasImageInputs && !hasMediaInputs) {
       return NextResponse.json<GenerateResponse>(
         {
           success: false,
-          error: "Prompt or image input is required",
+          error: "Prompt, image, video, or audio input is required",
         },
         { status: 400 }
       );
@@ -306,7 +278,7 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Process images - Kie requires URLs, we'll upload base64 images in generateWithKie
+      // Process images - Kie requires URLs, we'll upload base64 images in submitKieTask
       const processedImages: string[] = images ? [...images] : [];
 
       // Process dynamicInputs: filter empty values
@@ -343,7 +315,7 @@ export async function POST(request: NextRequest) {
 
       // Submit task and return immediately — client polls for completion
       try {
-        const { taskId, isVeo } = await submitKieTask(requestId, kieApiKey, genInput);
+        const { taskId } = await submitKieTask(requestId, kieApiKey, genInput);
         return NextResponse.json<GenerateResponse>({
           success: true,
           polling: true,
@@ -443,6 +415,150 @@ export async function POST(request: NextRequest) {
       return buildMediaResponse(output);
     }
 
+    if (provider === "openai") {
+      if (!selectedModel?.modelId || !selectedModel?.displayName) {
+        return NextResponse.json<GenerateResponse>(
+          { success: false, error: "selectedModel with modelId and displayName is required for OpenAI" },
+          { status: 400 }
+        );
+      }
+
+      // User-provided key takes precedence over env variable
+      const openaiApiKey = request.headers.get("X-OpenAI-API-Key") || process.env.OPENAI_API_KEY;
+      if (!openaiApiKey) {
+        return NextResponse.json<GenerateResponse>(
+          {
+            success: false,
+            error: "OpenAI API key not configured. Add OPENAI_API_KEY to .env.local or configure in Settings.",
+          },
+          { status: 401 }
+        );
+      }
+
+      // Keep Data URIs as-is since localhost URLs won't work
+      const processedImages: string[] = images ? [...images] : [];
+
+      // Process dynamicInputs: filter empty values
+      let processedDynamicInputs: Record<string, string | string[]> | undefined = undefined;
+
+      if (dynamicInputs) {
+        processedDynamicInputs = {};
+        for (const key of Object.keys(dynamicInputs)) {
+          const value = dynamicInputs[key];
+
+          // Skip empty/null/undefined values (arrays pass through)
+          if (value === null || value === undefined || value === '') {
+            continue;
+          }
+
+          processedDynamicInputs[key] = value;
+        }
+      }
+
+      // Build generation input
+      const genInput: GenerationInput = {
+        model: {
+          id: selectedModel.modelId,
+          name: selectedModel.displayName,
+          provider: "openai",
+          capabilities: capabilitiesForMediaType(mediaType),
+          description: null,
+        },
+        prompt: prompt || "",
+        images: processedImages,
+        parameters,
+        dynamicInputs: processedDynamicInputs,
+      };
+
+      const result = await generateWithOpenAI(requestId, openaiApiKey, genInput);
+
+      if (!result.success) {
+        return NextResponse.json<GenerateResponse>(
+          {
+            success: false,
+            error: result.error || "Generation failed",
+          },
+          { status: 500 }
+        );
+      }
+
+      // Return first output
+      const output = result.outputs?.[0];
+      if (!output?.data && !output?.url) {
+        return NextResponse.json<GenerateResponse>(
+          { success: false, error: "No output in generation result" },
+          { status: 500 }
+        );
+      }
+
+      return buildMediaResponse(output);
+    }
+
+    if (provider === "reve") {
+      if (!selectedModel?.modelId || !selectedModel?.displayName) {
+        return NextResponse.json<GenerateResponse>(
+          { success: false, error: "selectedModel with modelId and displayName is required for REVE" },
+          { status: 400 }
+        );
+      }
+
+      const reveApiKey = request.headers.get("X-Reve-API-Key") || process.env.REVE_API_KEY;
+      if (!reveApiKey) {
+        return NextResponse.json<GenerateResponse>(
+          {
+            success: false,
+            error: "REVE API key not configured. Add REVE_API_KEY to .env.local or configure in Settings.",
+          },
+          { status: 401 }
+        );
+      }
+
+      const processedImages: string[] = images ? [...images] : [];
+
+      let processedDynamicInputs: Record<string, string | string[]> | undefined = undefined;
+      if (dynamicInputs) {
+        processedDynamicInputs = {};
+        for (const key of Object.keys(dynamicInputs)) {
+          const value = dynamicInputs[key];
+          if (value === null || value === undefined || value === "") continue;
+          processedDynamicInputs[key] = value;
+        }
+      }
+
+      const genInput: GenerationInput = {
+        model: {
+          id: selectedModel.modelId,
+          name: selectedModel.displayName,
+          provider: "reve",
+          capabilities: capabilitiesForMediaType(mediaType),
+          description: null,
+        },
+        prompt: prompt || "",
+        images: processedImages,
+        parameters,
+        dynamicInputs: processedDynamicInputs,
+      };
+
+      const result = await generateWithReve(requestId, reveApiKey, genInput);
+
+      if (!result.success) {
+        return NextResponse.json<GenerateResponse>(
+          { success: false, error: result.error || "Generation failed" },
+          { status: 500 }
+        );
+      }
+
+      const output = result.outputs?.[0];
+      if (!output?.data && !output?.url) {
+        return NextResponse.json<GenerateResponse>(
+          { success: false, error: "No output in REVE generation result" },
+          { status: 500 }
+        );
+      }
+
+      return buildMediaResponse(output);
+    }
+
     // Default: Use Gemini
     // User-provided key (from settings) takes precedence over env variable
     const geminiApiKey = request.headers.get("X-Gemini-API-Key") || process.env.GEMINI_API_KEY;
@@ -453,7 +569,7 @@ export async function POST(request: NextRequest) {
           success: false,
           error: "API key not configured. Add GEMINI_API_KEY to .env.local or configure in Settings.",
         },
-        { status: 500 }
+        { status: 401 }
       );
     }
 

@@ -15,7 +15,14 @@ export interface CommentNavigationProps {
   onNext: () => void;
 }
 
-const RUNNABLE_TYPES = new Set(['nanoBanana', 'generateVideo', 'generate3d', 'generateAudio', 'llmGenerate']);
+const RUNNABLE_TYPES = new Set([
+  'nanoBanana',
+  'generateVideo',
+  'generate3d',
+  'generateAudio',
+  'llmGenerate',
+  'removeBackground',
+]);
 const EXPANDABLE_TYPES = new Set(['prompt', 'promptConstructor', 'splitGrid', 'annotation']);
 
 interface FloatingNodeHeaderProps {

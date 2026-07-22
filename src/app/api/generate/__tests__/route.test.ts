@@ -41,7 +41,8 @@ vi.mock("@/lib/images", () => ({
   deleteImages: vi.fn(),
 }));
 
-import { POST, clearFalInputMappingCache } from "../route";
+import { POST } from "../route";
+import { clearFalInputMappingCache } from "../shared";
 
 // Store original env
 const originalEnv = { ...process.env };
@@ -269,7 +270,9 @@ describe("/api/generate route", () => {
       expect(data.success).toBe(true);
       expect(mockGenerateContent).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: [{ googleSearch: {} }],
+          config: expect.objectContaining({
+            tools: [{ googleSearch: {} }],
+          }),
         })
       );
     });
@@ -292,8 +295,10 @@ describe("/api/generate route", () => {
       expect(data.success).toBe(true);
       // For nano-banana, tools should not be included even if useGoogleSearch is true
       expect(mockGenerateContent).toHaveBeenCalledWith(
-        expect.not.objectContaining({
-          tools: expect.anything(),
+        expect.objectContaining({
+          config: expect.not.objectContaining({
+            tools: expect.anything(),
+          }),
         })
       );
     });
@@ -316,7 +321,9 @@ describe("/api/generate route", () => {
       expect(data.success).toBe(true);
       expect(mockGenerateContent).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: [{ googleSearch: { searchTypes: { imageSearch: {} } } }],
+          config: expect.objectContaining({
+            tools: [{ googleSearch: { searchTypes: { imageSearch: {} } } }],
+          }),
         })
       );
     });
@@ -340,7 +347,9 @@ describe("/api/generate route", () => {
       expect(data.success).toBe(true);
       expect(mockGenerateContent).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: [{ googleSearch: { searchTypes: { webSearch: {}, imageSearch: {} } } }],
+          config: expect.objectContaining({
+            tools: [{ googleSearch: { searchTypes: { webSearch: {}, imageSearch: {} } } }],
+          }),
         })
       );
     });
@@ -363,7 +372,9 @@ describe("/api/generate route", () => {
       expect(data.success).toBe(true);
       expect(mockGenerateContent).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: [{ googleSearch: { searchTypes: { webSearch: {} } } }],
+          config: expect.objectContaining({
+            tools: [{ googleSearch: { searchTypes: { webSearch: {} } } }],
+          }),
         })
       );
     });
@@ -388,7 +399,9 @@ describe("/api/generate route", () => {
       // nano-banana-pro should use old format, ignoring useImageSearch
       expect(mockGenerateContent).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: [{ googleSearch: {} }],
+          config: expect.objectContaining({
+            tools: [{ googleSearch: {} }],
+          }),
         })
       );
     });
@@ -438,7 +451,7 @@ describe("/api/generate route", () => {
       });
     });
 
-    it("should return 500 when API key missing", async () => {
+    it("should return 401 when API key missing", async () => {
       delete process.env.GEMINI_API_KEY;
 
       const request = createMockPostRequest({
@@ -449,7 +462,7 @@ describe("/api/generate route", () => {
       const response = await POST(request);
       const data = await response.json();
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(401);
       expect(data.success).toBe(false);
       expect(data.error).toContain("API key not configured");
     });
@@ -711,7 +724,7 @@ describe("/api/generate route", () => {
 
       expect(response.status).toBe(400);
       expect(data.success).toBe(false);
-      expect(data.error).toBe("Prompt or image input is required");
+      expect(data.error).toBe("Prompt, image, video, or audio input is required");
     });
 
     it("should accept request with only images (image-to-image)", async () => {
@@ -789,6 +802,42 @@ describe("/api/generate route", () => {
 
       expect(response.status).toBe(200);
       expect(data.success).toBe(true);
+    });
+
+    it("should accept request with dynamicInputs containing a video (video-to-video)", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+
+      mockGenerateContent.mockResolvedValueOnce(createGeminiImageResponse());
+
+      const request = createMockPostRequest({
+        dynamicInputs: {
+          video_url: "data:video/mp4;base64,videoData",
+        },
+        model: "nano-banana-pro",
+      });
+
+      const response = await POST(request);
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(data.success).toBe(true);
+    });
+
+    it("should reject request whose only media input is an empty value", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+
+      const request = createMockPostRequest({
+        dynamicInputs: {
+          video_url: "",
+        },
+        model: "nano-banana-pro",
+      });
+
+      const response = await POST(request);
+      const data = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(data.success).toBe(false);
     });
 
     it("should handle multiple images in request", async () => {
@@ -1770,6 +1819,212 @@ describe("/api/generate route", () => {
           guidance_scale: "10.0", // dynamicInputs value
         })
       );
+    });
+  });
+
+  describe("OpenAI provider", () => {
+    const mockFetch = vi.fn();
+    const originalFetch = global.fetch;
+
+    beforeEach(() => {
+      global.fetch = mockFetch;
+      mockFetch.mockReset();
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    it("should generate image successfully via OpenAI text-to-image", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          created: 1234567890,
+          data: [{ b64_json: "openaiBase64ImageData" }],
+        }),
+      });
+
+      const request = createMockPostRequest(
+        {
+          prompt: "A futuristic cityscape",
+          selectedModel: {
+            provider: "openai",
+            modelId: "gpt-image-1",
+            displayName: "GPT Image 1",
+          },
+          parameters: { size: "1024x1024", quality: "high" },
+        },
+        { "X-OpenAI-API-Key": "test-openai-key" }
+      );
+
+      const response = await POST(request);
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(data.success).toBe(true);
+      expect(data.image).toBe("data:image/png;base64,openaiBase64ImageData");
+
+      // Verify the API call
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://api.openai.com/v1/images/generations",
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-openai-key",
+            "Content-Type": "application/json",
+          }),
+          body: expect.stringContaining("gpt-image-1"),
+        })
+      );
+    });
+
+    it("should generate image via OpenAI image-to-image", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          created: 1234567890,
+          data: [{ b64_json: "openaiEditedImageData" }],
+        }),
+      });
+
+      const request = createMockPostRequest(
+        {
+          prompt: "Add more neon lights",
+          images: ["data:image/png;base64,inputImageData"],
+          selectedModel: {
+            provider: "openai",
+            modelId: "gpt-image-1",
+            displayName: "GPT Image 1",
+            capabilities: ["text-to-image", "image-to-image"],
+          },
+        },
+        { "X-OpenAI-API-Key": "test-openai-key" }
+      );
+
+      const response = await POST(request);
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(data.success).toBe(true);
+      expect(data.image).toBe("data:image/png;base64,openaiEditedImageData");
+
+      // Verify it calls the edits endpoint
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://api.openai.com/v1/images/edits",
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-openai-key",
+          }),
+        })
+      );
+    });
+
+    it("should return 401 for OpenAI provider without API key", async () => {
+      delete process.env.OPENAI_API_KEY;
+
+      const request = createMockPostRequest({
+        prompt: "Test prompt",
+        selectedModel: {
+          provider: "openai",
+          modelId: "gpt-image-1",
+          displayName: "GPT Image 1",
+        },
+      });
+
+      const response = await POST(request);
+      const data = await response.json();
+
+      expect(response.status).toBe(401);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("OpenAI API key not configured");
+    });
+
+    it("should handle rate limit (429) from OpenAI", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        text: () => Promise.resolve(JSON.stringify({ error: { message: "Rate limit exceeded", type: "rate_limit_error" } })),
+      });
+
+      const request = createMockPostRequest(
+        {
+          prompt: "Test prompt",
+          selectedModel: {
+            provider: "openai",
+            modelId: "gpt-image-1",
+            displayName: "GPT Image 1",
+          },
+        },
+        { "X-OpenAI-API-Key": "test-openai-key" }
+      );
+
+      const response = await POST(request);
+      const data = await response.json();
+
+      expect(response.status).toBe(500);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Rate limit exceeded");
+    });
+
+    it("should handle empty response from OpenAI", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ created: 1234567890, data: [] }),
+      });
+
+      const request = createMockPostRequest(
+        {
+          prompt: "Test prompt",
+          selectedModel: {
+            provider: "openai",
+            modelId: "gpt-image-1",
+            displayName: "GPT Image 1",
+          },
+        },
+        { "X-OpenAI-API-Key": "test-openai-key" }
+      );
+
+      const response = await POST(request);
+      const data = await response.json();
+
+      expect(response.status).toBe(500);
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("No image returned from OpenAI");
+    });
+
+    it("returns a clean message for a non-JSON gateway error (520), not raw HTML", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 520,
+        statusText: "",
+        text: () => Promise.resolve(
+          "<!DOCTYPE html><html><head><title>api.openai.com | 520</title></head><body>Web server is returning an unknown error</body></html>"
+        ),
+      });
+
+      const request = createMockPostRequest(
+        {
+          prompt: "Test prompt",
+          selectedModel: {
+            provider: "openai",
+            modelId: "gpt-image-2",
+            displayName: "GPT Image 2",
+          },
+        },
+        { "X-OpenAI-API-Key": "test-openai-key" }
+      );
+
+      const response = await POST(request);
+      const data = await response.json();
+
+      expect(response.status).toBe(500);
+      expect(data.success).toBe(false);
+      // No raw HTML leaks through; message is concise and actionable.
+      expect(data.error).not.toContain("<!DOCTYPE");
+      expect(data.error).not.toContain("<html");
+      expect(data.error).toContain("temporarily unavailable");
+      expect(data.error).toContain("520");
     });
   });
 

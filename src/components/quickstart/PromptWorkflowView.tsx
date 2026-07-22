@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { WorkflowFile } from "@/store/workflowStore";
 import { QuickstartBackButton } from "./QuickstartBackButton";
 
@@ -17,6 +17,19 @@ export function PromptWorkflowView({
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Track mount status and the in-flight request so that closing/unmounting
+  // the modal cancels the generation and never clobbers the current canvas.
+  const isMountedRef = useRef(true);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
   const handleGenerate = useCallback(async () => {
     if (!description || description.trim().length < 3) {
       setError("Please describe your workflow (at least 3 characters)");
@@ -26,6 +39,9 @@ export function PromptWorkflowView({
     setError(null);
     setIsGenerating(true);
 
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     try {
       const response = await fetch("/api/quickstart", {
         method: "POST",
@@ -34,9 +50,16 @@ export function PromptWorkflowView({
           description: description.trim(),
           contentLevel: "full",
         }),
+        signal: abortController.signal,
       });
 
       const result = await response.json();
+
+      // Bail out if the component unmounted or the request was aborted while
+      // awaiting — never load a stale workflow over the user's canvas.
+      if (!isMountedRef.current || abortController.signal.aborted) {
+        return;
+      }
 
       if (!result.success) {
         throw new Error(result.error || "Failed to generate workflow");
@@ -46,12 +69,25 @@ export function PromptWorkflowView({
         onWorkflowGenerated(result.workflow);
       }
     } catch (err) {
+      // Ignore abort errors and any error after unmount.
+      if (
+        (err instanceof DOMException && err.name === "AbortError") ||
+        !isMountedRef.current ||
+        abortController.signal.aborted
+      ) {
+        return;
+      }
       console.error("Prompt workflow error:", err);
       setError(
         err instanceof Error ? err.message : "Failed to generate workflow"
       );
     } finally {
-      setIsGenerating(false);
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null;
+      }
+      if (isMountedRef.current) {
+        setIsGenerating(false);
+      }
     }
   }, [description, onWorkflowGenerated]);
 

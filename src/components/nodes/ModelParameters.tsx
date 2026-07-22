@@ -77,6 +77,11 @@ function ModelParametersInner({
   onInputsLoaded,
 }: ModelParametersProps) {
   const [schema, setSchema] = useState<ModelParameter[]>([]);
+  // Tracks which `${provider}:${modelId}` the current `schema` belongs to.
+  // Prevents the defaults effect from writing a previous model's defaults into
+  // freshly-cleared parameters during the render where modelId changes but the
+  // async schema fetch hasn't updated `schema` yet.
+  const [schemaKey, setSchemaKey] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Use stable selector for API keys to prevent unnecessary re-fetches
@@ -86,15 +91,24 @@ function ModelParametersInner({
   useEffect(() => {
     if (!modelId) {
       setSchema([]);
+      setSchemaKey("");
       onInputsLoaded?.([]);
       return;
     }
+
+    const currentKey = `${provider}:${modelId}`;
+    // Staleness guard: if modelId/provider changes before this async flow
+    // resolves, an older in-flight request must not overwrite the newer
+    // model's schema/inputs. Cleanup sets `cancelled = true` on the stale run.
+    let cancelled = false;
 
     const fetchSchema = async () => {
       // Check localStorage cache first
       const cached = getCachedSchema(modelId, provider);
       if (cached) {
+        if (cancelled) return;
         setSchema(cached.parameters);
+        setSchemaKey(currentKey);
         onInputsLoaded?.(cached.inputs);
         return;
       }
@@ -131,29 +145,44 @@ function ModelParametersInner({
         const data = await response.json();
         const params = data.parameters || [];
         const inputs = data.inputs || [];
-        setSchema(params);
 
-        // Cache the successful result
+        // Cache the successful result (safe regardless of staleness).
         setCachedSchema(modelId, provider, params, inputs);
+
+        if (cancelled) return;
+        setSchema(params);
+        setSchemaKey(currentKey);
 
         // Pass inputs to parent for dynamic handle rendering
         if (onInputsLoaded) {
           onInputsLoaded(inputs);
         }
       } catch (err) {
+        if (cancelled) return;
         console.error("Failed to fetch model schema:", err);
         setError(err instanceof Error ? err.message : "Failed to fetch schema");
         setSchema([]);
+        setSchemaKey(currentKey);
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     };
 
     fetchSchema();
+
+    return () => {
+      cancelled = true;
+    };
   }, [modelId, provider, replicateApiKey, falApiKey, kieApiKey, wavespeedApiKey, onInputsLoaded]);
 
   // Pre-populate schema defaults into parameters
   useEffect(() => {
+    // Guard: only apply defaults when `schema` belongs to the currently
+    // selected model. On model switch the parent clears `parameters` to {}
+    // synchronously, but `schema` (fetched async) still holds the previous
+    // model's schema for one render — applying it here would write the old
+    // model's defaults back into the new model's parameters.
+    if (schemaKey !== `${provider}:${modelId}`) return;
     if (schema.length === 0) return;
     const defaults: Record<string, unknown> = {};
     let hasNewDefaults = false;
@@ -166,7 +195,7 @@ function ModelParametersInner({
     if (hasNewDefaults) {
       onParametersChange({ ...parameters, ...defaults });
     }
-  }, [schema, parameters, onParametersChange]);
+  }, [schema, schemaKey, modelId, provider, parameters, onParametersChange]);
 
   // Notify parent to resize node when schema loads
   useEffect(() => {

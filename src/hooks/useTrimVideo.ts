@@ -41,7 +41,8 @@ export async function trimVideoAsync(
   videoBlob: Blob,
   startTime: number,
   endTime: number,
-  onProgress?: (progress: TrimProgress) => void
+  onProgress?: (progress: TrimProgress) => void,
+  signal?: AbortSignal
 ): Promise<Blob> {
   const updateProgress = (
     status: TrimProgress['status'],
@@ -133,6 +134,7 @@ export async function trimVideoAsync(
           const audioBuffers: AudioBuffer[] = [];
 
           for await (const wrapped of sink.buffers(startTime, endTime)) {
+            if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
             audioBuffers.push(wrapped.buffer);
           }
 
@@ -197,6 +199,8 @@ export async function trimVideoAsync(
           }
         }
       } catch (audioErr) {
+        // A user Stop must not be swallowed by the graceful audio-degradation path.
+        if (audioErr instanceof DOMException && audioErr.name === "AbortError") throw audioErr;
         console.warn('Audio extraction failed, continuing without audio:', audioErr);
       }
 
@@ -222,6 +226,10 @@ export async function trimVideoAsync(
       let frameCount = 0;
 
       for await (const sample of sink.samples(startTime, endTime)) {
+        if (signal?.aborted) {
+          sample.close();
+          throw new DOMException("Aborted", "AbortError");
+        }
         const originalTimestamp = sample.timestamp ?? 0;
 
         // On first sample, record the minimum timestamp to normalize from
@@ -311,6 +319,9 @@ export async function trimVideoAsync(
       input.dispose();
     }
   } catch (error) {
+    // Preserve cancellation as an AbortError so the executor treats Stop as
+    // idle rather than a failure (normalizing below would strip the type).
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
     const normalizedError = error instanceof Error ? error : new Error(String(error));
     console.error('Video trim error:', normalizedError);
 

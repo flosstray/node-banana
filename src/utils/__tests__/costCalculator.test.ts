@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { hasNonGeminiProviders } from "@/utils/costCalculator";
+import { hasNonGeminiProviders, calculatePredictedCost } from "@/utils/costCalculator";
 import { WorkflowNode } from "@/types";
 
 describe("hasNonGeminiProviders", () => {
@@ -231,5 +231,62 @@ describe("hasNonGeminiProviders", () => {
       },
     ];
     expect(hasNonGeminiProviders(nodes)).toBe(true);
+  });
+});
+
+describe("calculatePredictedCost - splitGrid nodes", () => {
+  // splitGrid cell templates are materialized into real nodes on the canvas,
+  // so generate nodes inside cells are counted directly. The splitGrid node
+  // itself must not contribute any cost line.
+  const splitGridNode: WorkflowNode = {
+    id: "split-1",
+    type: "splitGrid",
+    position: { x: 0, y: 0 },
+    data: {
+      sourceImage: null,
+      gridRows: 2,
+      gridCols: 2,
+      // Legacy (deprecated) fields must not influence the estimate either
+      targetCount: 4,
+      defaultPrompt: "",
+      generateSettings: {
+        aspectRatio: "1:1",
+        resolution: "1K",
+        model: "nano-banana",
+        useGoogleSearch: false,
+        useImageSearch: false,
+      },
+      childNodeIds: [],
+      isConfigured: true,
+    },
+  } as WorkflowNode;
+
+  it("should not count splitGrid nodes toward the estimate", () => {
+    const result = calculatePredictedCost([splitGridNode]);
+
+    expect(result.totalCost).toBe(0);
+    expect(result.nodeCount).toBe(0);
+    expect(result.breakdown).toEqual([]);
+    expect(result.unknownPricingCount).toBe(0);
+  });
+
+  it("should only count non-splitGrid generation nodes in a mixed workflow", () => {
+    const nodes: WorkflowNode[] = [
+      splitGridNode,
+      {
+        id: "gen-1",
+        type: "nanoBanana",
+        position: { x: 100, y: 0 },
+        data: { model: "nano-banana", resolution: "1K" },
+      },
+    ];
+
+    const result = calculatePredictedCost(nodes);
+
+    // Only the nanoBanana node: $0.039 (no legacy 4-cell splitGrid estimate)
+    expect(result.totalCost).toBeCloseTo(0.039);
+    expect(result.nodeCount).toBe(1);
+    expect(result.breakdown).toHaveLength(1);
+    expect(result.breakdown[0].modelId).toBe("nano-banana");
   });
 });

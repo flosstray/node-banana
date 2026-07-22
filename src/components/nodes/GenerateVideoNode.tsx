@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useState, useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useState, useEffect, useMemo } from "react";
 import { Handle, Position, NodeProps, Node, useReactFlow } from "@xyflow/react";
 import { BaseNode } from "./BaseNode";
 import { ModelParameters } from "./ModelParameters";
@@ -9,8 +9,7 @@ import { deduplicatedFetch } from "@/utils/deduplicatedFetch";
 import { GenerateVideoNodeData, ProviderType, SelectedModel, ModelInputDef } from "@/types";
 import { ProviderModel, ModelCapability } from "@/lib/providers/types";
 import { ModelSearchDialog } from "@/components/modals/ModelSearchDialog";
-import { useToast } from "@/components/Toast";
-import { getVideoDimensions, calculateNodeSizePreservingHeight } from "@/utils/nodeDimensions";
+import { getVideoDimensions } from "@/utils/nodeDimensions";
 import { ProviderBadge } from "./ProviderBadge";
 import { useVideoBlobUrl } from "@/hooks/useVideoBlobUrl";
 import { useVideoAutoplay } from "@/hooks/useVideoAutoplay";
@@ -21,6 +20,10 @@ import { browseRegistry } from "@/utils/browseRegistry";
 import { downloadMedia } from "@/utils/downloadMedia";
 import { useShowHandleLabels } from "@/hooks/useShowHandleLabels";
 import { HandleLabel } from "./HandleLabel";
+import { useLoadGenerationById } from "@/hooks/useLoadGenerationById";
+import { useGenerationCarousel } from "@/hooks/useGenerationCarousel";
+import { useErrorToast } from "@/hooks/useErrorToast";
+import { useAutoResizeOnMedia } from "@/hooks/useAutoResizeOnMedia";
 
 // Video generation capabilities
 const VIDEO_CAPABILITIES: ModelCapability[] = ["text-to-video", "image-to-video", "audio-to-video"];
@@ -52,12 +55,10 @@ export function GenerateVideoNode({ id, data, selected }: NodeProps<GenerateVide
   const updateNodeData = useWorkflowStore((state) => state.updateNodeData);
   // Use stable selector for API keys to prevent unnecessary re-fetches
   const { geminiApiKey, replicateApiKey, falApiKey, kieApiKey, replicateEnabled, kieEnabled } = useProviderApiKeys();
-  const generationsPath = useWorkflowStore((state) => state.generationsPath);
   const [externalModels, setExternalModels] = useState<ProviderModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [modelsFetchError, setModelsFetchError] = useState<string | null>(null);
   const [isBrowseDialogOpen, setIsBrowseDialogOpen] = useState(false);
-  const [isLoadingCarouselVideo, setIsLoadingCarouselVideo] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"primary" | "fallback">("primary");
 
   useEffect(() => {
@@ -241,79 +242,25 @@ export function GenerateVideoNode({ id, data, selected }: NodeProps<GenerateVide
   }, [id, regenerateNode]);
 
   // Load video by ID from generations folder
-  const loadVideoById = useCallback(async (videoId: string) => {
-    if (!generationsPath) {
-      console.error("Generations path not configured");
-      return null;
-    }
-
-    try {
-      const response = await fetch("/api/load-generation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          directoryPath: generationsPath,
-          imageId: videoId,
-        }),
-      });
-
-      const result = await response.json();
-      if (!result.success) {
-        // Missing videos are expected when refs point to deleted/moved files
-        console.log(`Video not found: ${videoId}`);
-        return null;
-      }
-      return result.video || result.image;
-    } catch (error) {
-      console.warn("Error loading video:", error);
-      return null;
-    }
-  }, [generationsPath]);
+  const loadVideoById = useLoadGenerationById("video", "Video");
 
   // Carousel navigation handlers
-  const handleCarouselPrevious = useCallback(async () => {
-    const history = nodeData.videoHistory || [];
-    if (history.length === 0 || isLoadingCarouselVideo) return;
-
-    const currentIndex = nodeData.selectedVideoHistoryIndex || 0;
-    const newIndex = currentIndex === 0 ? history.length - 1 : currentIndex - 1;
-    const videoItem = history[newIndex];
-
-    setIsLoadingCarouselVideo(true);
-    const video = await loadVideoById(videoItem.id);
-    setIsLoadingCarouselVideo(false);
-
-    if (video) {
-      updateNodeData(id, {
-        outputVideo: video,
-        selectedVideoHistoryIndex: newIndex,
-        status: "idle",
-        error: null,
-      });
-    }
-  }, [id, nodeData.videoHistory, nodeData.selectedVideoHistoryIndex, isLoadingCarouselVideo, loadVideoById, updateNodeData]);
-
-  const handleCarouselNext = useCallback(async () => {
-    const history = nodeData.videoHistory || [];
-    if (history.length === 0 || isLoadingCarouselVideo) return;
-
-    const currentIndex = nodeData.selectedVideoHistoryIndex || 0;
-    const newIndex = (currentIndex + 1) % history.length;
-    const videoItem = history[newIndex];
-
-    setIsLoadingCarouselVideo(true);
-    const video = await loadVideoById(videoItem.id);
-    setIsLoadingCarouselVideo(false);
-
-    if (video) {
-      updateNodeData(id, {
-        outputVideo: video,
-        selectedVideoHistoryIndex: newIndex,
-        status: "idle",
-        error: null,
-      });
-    }
-  }, [id, nodeData.videoHistory, nodeData.selectedVideoHistoryIndex, isLoadingCarouselVideo, loadVideoById, updateNodeData]);
+  const {
+    isLoading: isLoadingCarouselVideo,
+    handlePrevious: handleCarouselPrevious,
+    handleNext: handleCarouselNext,
+  } = useGenerationCarousel({
+    nodeId: id,
+    history: nodeData.videoHistory,
+    currentIndex: nodeData.selectedVideoHistoryIndex,
+    loadFn: loadVideoById,
+    buildUpdate: (video, newIndex) => ({
+      outputVideo: video,
+      selectedVideoHistoryIndex: newIndex,
+      status: "idle",
+      error: null,
+    }),
+  });
 
   // Handle model selection from browse dialog
   const handleBrowseModelSelect = useCallback((model: ProviderModel) => {
@@ -346,51 +293,11 @@ export function GenerateVideoNode({ id, data, selected }: NodeProps<GenerateVide
 
   const hasCarouselVideos = (nodeData.videoHistory || []).length > 1;
 
-  // Track previous status to detect error transitions
-  const prevStatusRef = useRef(nodeData.status);
-
-  // Show toast when error occurs
-  useEffect(() => {
-    if (nodeData.status === "error" && prevStatusRef.current !== "error" && nodeData.error) {
-      useToast.getState().show("Video generation failed", "error", true, nodeData.error);
-    }
-    prevStatusRef.current = nodeData.status;
-  }, [nodeData.status, nodeData.error]);
+  // Show toast when generation fails
+  useErrorToast(nodeData.status, nodeData.error, "Video generation failed");
 
   // Auto-resize node when output video changes
-  const prevOutputVideoRef = useRef<string | null>(null);
-  useEffect(() => {
-    // Only resize when outputVideo transitions from null/different to a new value
-    if (!nodeData.outputVideo || nodeData.outputVideo === prevOutputVideoRef.current) {
-      prevOutputVideoRef.current = nodeData.outputVideo ?? null;
-      return;
-    }
-    prevOutputVideoRef.current = nodeData.outputVideo;
-
-    // Use requestAnimationFrame to avoid React Flow update conflicts
-    requestAnimationFrame(() => {
-      getVideoDimensions(nodeData.outputVideo!).then((dims) => {
-        if (!dims) return;
-
-        const aspectRatio = dims.width / dims.height;
-
-        setNodes((nodes) =>
-          nodes.map((node) => {
-            if (node.id !== id) return node;
-
-            // Preserve user's manually set height if present
-            const currentHeight = typeof node.style?.height === 'number'
-              ? node.style.height
-              : undefined;
-
-            const newSize = calculateNodeSizePreservingHeight(aspectRatio, currentHeight);
-
-            return { ...node, style: { ...node.style, width: newSize.width, height: newSize.height } };
-          })
-        );
-      });
-    });
-  }, [id, nodeData.outputVideo, setNodes]);
+  useAutoResizeOnMedia(id, nodeData.outputVideo, getVideoDimensions);
 
   return (
     <>
@@ -449,18 +356,20 @@ export function GenerateVideoNode({ id, data, selected }: NodeProps<GenerateVide
         // we still need the image handle to preserve connections made before model selection.
         (() => {
           const imageInputs = nodeData.inputSchema!.filter(i => i.type === "image");
+          const videoInputs = nodeData.inputSchema!.filter(i => i.type === "video");
           const audioInputs = nodeData.inputSchema!.filter(i => i.type === "audio");
           const textInputs = nodeData.inputSchema!.filter(i => i.type === "text");
 
           // Always include at least one image and one text handle for connection stability
           const hasImageInput = imageInputs.length > 0;
+          const hasVideoInput = videoInputs.length > 0;
           const hasAudioInput = audioInputs.length > 0;
           const hasTextInput = textInputs.length > 0;
 
           // Build the handles array: schema inputs + fallback defaults if missing
           const handles: Array<{
             id: string;
-            type: "image" | "text" | "audio";
+            type: "image" | "text" | "audio" | "video";
             label: string;
             schemaName: string | null;
             description: string | null;
@@ -484,6 +393,30 @@ export function GenerateVideoNode({ id, data, selected }: NodeProps<GenerateVide
               id: "image",
               type: "image",
               label: "Image",
+              schemaName: null,
+              description: "Not used by this model",
+              isPlaceholder: true,
+            });
+          }
+
+          // Add video handles from schema, or a placeholder if none exist, so a
+          // video source can always be attached (e.g. before model selection).
+          if (hasVideoInput) {
+            videoInputs.forEach((input, index) => {
+              handles.push({
+                id: `video-${index}`,
+                type: "video",
+                label: input.label,
+                schemaName: input.name,
+                description: input.description || null,
+                isPlaceholder: false,
+              });
+            });
+          } else {
+            handles.push({
+              id: "video",
+              type: "video",
+              label: "Video",
               schemaName: null,
               description: "Not used by this model",
               isPlaceholder: true,
@@ -527,32 +460,40 @@ export function GenerateVideoNode({ id, data, selected }: NodeProps<GenerateVide
             });
           }
 
-          // Calculate positions: group by type order (image, audio, text) with gaps between groups
-          const imageHandles = handles.filter(h => h.type === "image");
-          const audioHandles = handles.filter(h => h.type === "audio");
-          const textHandles = handles.filter(h => h.type === "text");
-          const groupCount = [imageHandles.length > 0, audioHandles.length > 0, textHandles.length > 0].filter(Boolean).length;
-          const totalSlots = imageHandles.length + audioHandles.length + textHandles.length + (groupCount - 1); // gaps between groups
+          // Calculate positions: group by type order (image, video, audio, text)
+          // with a one-slot gap between adjacent non-empty groups.
+          const orderedGroups = [
+            { type: "image", handles: handles.filter(h => h.type === "image") },
+            { type: "video", handles: handles.filter(h => h.type === "video") },
+            { type: "audio", handles: handles.filter(h => h.type === "audio") },
+            { type: "text", handles: handles.filter(h => h.type === "text") },
+          ].filter(g => g.handles.length > 0);
+
+          const groupCount = orderedGroups.length;
+          const totalSlots =
+            orderedGroups.reduce((sum, g) => sum + g.handles.length, 0) +
+            Math.max(0, groupCount - 1); // gaps between groups
+
+          // Assign each handle a slot index, inserting a gap between groups
+          const slotById = new Map<string, number>();
+          let slotCursor = 0;
+          orderedGroups.forEach((group, groupIndex) => {
+            if (groupIndex > 0) slotCursor += 1; // gap before this group
+            group.handles.forEach((h) => {
+              slotById.set(h.id, slotCursor);
+              slotCursor += 1;
+            });
+          });
 
           const getHandleColor = (type: string) => {
             if (type === "image") return "var(--handle-color-image)";
+            if (type === "video") return "var(--handle-color-video)";
             if (type === "audio") return "var(--handle-color-audio)";
             return "var(--handle-color-text)";
           };
 
           const renderedHandles = handles.map((handle) => {
-            // Calculate position based on type group ordering
-            let adjustedIndex: number;
-            if (handle.type === "image") {
-              adjustedIndex = imageHandles.findIndex(h => h.id === handle.id);
-            } else if (handle.type === "audio") {
-              const gapAfterImages = imageHandles.length > 0 ? 1 : 0;
-              adjustedIndex = imageHandles.length + gapAfterImages + audioHandles.findIndex(h => h.id === handle.id);
-            } else {
-              const gapAfterImages = imageHandles.length > 0 && (audioHandles.length > 0 || textHandles.length > 0) ? 1 : 0;
-              const gapAfterAudio = audioHandles.length > 0 && textHandles.length > 0 ? 1 : 0;
-              adjustedIndex = imageHandles.length + gapAfterImages + audioHandles.length + gapAfterAudio + textHandles.findIndex(h => h.id === handle.id);
-            }
+            const adjustedIndex = slotById.get(handle.id) ?? 0;
             const topPercent = ((adjustedIndex + 1) / (totalSlots + 1)) * 100;
 
             return (
@@ -590,6 +531,15 @@ export function GenerateVideoNode({ id, data, selected }: NodeProps<GenerateVide
                   isConnectable={false}
                 />
               )}
+              {hasVideoInput && (
+                <Handle
+                  type="target"
+                  position={Position.Left}
+                  id="video"
+                  style={{ top: "42%", opacity: 0, pointerEvents: "none" }}
+                  isConnectable={false}
+                />
+              )}
               {hasAudioInput && (
                 <Handle
                   type="target"
@@ -624,6 +574,16 @@ export function GenerateVideoNode({ id, data, selected }: NodeProps<GenerateVide
           />
           {/* Default image label */}
           <HandleLabel label="Image" side="target" color="var(--handle-color-image)" top="calc(35% - 18px)" visible={showLabels} />
+          <Handle
+            type="target"
+            position={Position.Left}
+            id="video"
+            style={{ top: "50%", zIndex: 10 }}
+            data-handletype="video"
+            isConnectable={true}
+          />
+          {/* Default video label */}
+          <HandleLabel label="Video" side="target" color="var(--handle-color-video)" top="calc(50% - 18px)" visible={showLabels} />
           <Handle
             type="target"
             position={Position.Left}

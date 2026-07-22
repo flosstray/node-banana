@@ -4,14 +4,12 @@ import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Node } from "@xyflow/react";
 import { useWorkflowStore, saveNanoBananaDefaults, useProviderApiKeys } from "@/store/workflowStore";
-import { NodeType, NanoBananaNodeData, LLMGenerateNodeData, GenerateVideoNodeData, Generate3DNodeData, GenerateAudioNodeData, EaseCurveNodeData, ConditionalSwitchNodeData, AspectRatio, Resolution, ModelType, MODEL_DISPLAY_NAMES, ProviderType, SelectedModel, LLMProvider, LLMModelType, MatchMode, ConditionalSwitchRule } from "@/types";
+import { NodeType, NanoBananaNodeData, LLMGenerateNodeData, GenerateVideoNodeData, Generate3DNodeData, GenerateAudioNodeData, EaseCurveNodeData, ConditionalSwitchNodeData, AspectRatio, Resolution, ModelType, ProviderType, SelectedModel, LLMProvider, LLMModelType, MatchMode, ConditionalSwitchRule } from "@/types";
 import { ProviderModel, ModelCapability } from "@/lib/providers/types";
 import { ModelSearchDialog } from "@/components/modals/ModelSearchDialog";
 import { ModelParameters } from "./ModelParameters";
 import { CubicBezierEditor } from "@/components/CubicBezierEditor";
-import { deduplicatedFetch } from "@/utils/deduplicatedFetch";
-import { evaluateRule } from "@/store/utils/ruleEvaluation";
-import { EASING_PRESETS, getPresetBezier, getEasingBezier } from "@/lib/easing-presets";
+import { EASING_PRESETS, getEasingBezier } from "@/lib/easing-presets";
 import { getAllEasingNames, getEasingFunction } from "@/lib/easing-functions";
 import { getModelPageUrl, getProviderDisplayName } from "@/utils/providerUrls";
 import { useInlineParameters } from "@/hooks/useInlineParameters";
@@ -79,7 +77,6 @@ const LLM_MODELS: Record<LLMProvider, { value: LLMModelType; label: string }[]> 
 };
 
 // Image/video/audio/3d generation capabilities
-const IMAGE_CAPABILITIES: ModelCapability[] = ["text-to-image", "image-to-image"];
 const VIDEO_CAPABILITIES: ModelCapability[] = ["text-to-video", "image-to-video"];
 const AUDIO_CAPABILITIES: ModelCapability[] = ["text-to-audio"];
 const MODEL_3D_CAPABILITIES: ModelCapability[] = ["text-to-3d", "image-to-3d"];
@@ -201,10 +198,7 @@ function GenerateImageControls({ node }: { node: Node }) {
   const updateNodeData = useWorkflowStore((state) => state.updateNodeData);
   const regenerateNode = useWorkflowStore((state) => state.regenerateNode);
   const isRunning = useWorkflowStore((state) => state.isRunning);
-  const { replicateApiKey, falApiKey, kieApiKey, replicateEnabled, kieEnabled } = useProviderApiKeys();
-  const [externalModels, setExternalModels] = useState<ProviderModel[]>([]);
-  const [isLoadingModels, setIsLoadingModels] = useState(false);
-  const [modelsFetchError, setModelsFetchError] = useState<string | null>(null);
+  const { replicateApiKey, kieApiKey, openaiApiKey, replicateEnabled, kieEnabled, openaiEnabled } = useProviderApiKeys();
   const [isBrowseDialogOpen, setIsBrowseDialogOpen] = useState(false);
 
   const currentProvider: ProviderType = nodeData.selectedModel?.provider || "gemini";
@@ -220,113 +214,11 @@ function GenerateImageControls({ node }: { node: Node }) {
     if (kieEnabled && kieApiKey) {
       providers.push({ id: "kie", name: "Kie.ai" });
     }
+    if (openaiEnabled && openaiApiKey) {
+      providers.push({ id: "openai", name: "OpenAI" });
+    }
     return providers;
-  }, [replicateEnabled, replicateApiKey, kieEnabled, kieApiKey]);
-
-  // Fetch models from external providers
-  const fetchModels = useCallback(async () => {
-    if (currentProvider === "gemini") {
-      setExternalModels([]);
-      setModelsFetchError(null);
-      return;
-    }
-
-    setIsLoadingModels(true);
-    setModelsFetchError(null);
-    try {
-      const capabilities = IMAGE_CAPABILITIES.join(",");
-      const headers: HeadersInit = {};
-      switch (currentProvider) {
-        case "replicate":
-          if (replicateApiKey) headers["X-Replicate-Key"] = replicateApiKey;
-          break;
-        case "fal":
-          if (falApiKey) headers["X-Fal-Key"] = falApiKey;
-          break;
-        case "kie":
-          if (kieApiKey) headers["X-Kie-Key"] = kieApiKey;
-          break;
-      }
-
-      const response = await deduplicatedFetch(`/api/models?provider=${currentProvider}&capabilities=${capabilities}`, { headers });
-      if (response.ok) {
-        const data = await response.json();
-        setExternalModels(data.models || []);
-        setModelsFetchError(null);
-      } else {
-        const errorData = await response.json().catch(() => ({}));
-        const errorMsg = errorData.error || `Failed to load models (${response.status})`;
-        setExternalModels([]);
-        setModelsFetchError(errorMsg);
-      }
-    } catch (error) {
-      console.error("Failed to fetch models:", error);
-      setExternalModels([]);
-      setModelsFetchError("Failed to load models. Check your connection.");
-    } finally {
-      setIsLoadingModels(false);
-    }
-  }, [currentProvider, replicateApiKey, falApiKey, kieApiKey]);
-
-  useEffect(() => {
-    fetchModels();
-  }, [fetchModels]);
-
-  const handleProviderChange = useCallback(
-    (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const provider = e.target.value as ProviderType;
-
-      if (provider === "gemini") {
-        const newSelectedModel: SelectedModel = {
-          provider: "gemini",
-          modelId: nodeData.model || "nano-banana-pro",
-          displayName: GEMINI_IMAGE_MODELS.find(m => m.value === (nodeData.model || "nano-banana-pro"))?.label || "Nano Banana Pro",
-        };
-        updateNodeData(node.id, { selectedModel: newSelectedModel, parameters: {} });
-      } else {
-        const newSelectedModel: SelectedModel = {
-          provider,
-          modelId: "",
-          displayName: "Select model...",
-        };
-        updateNodeData(node.id, { selectedModel: newSelectedModel, parameters: {} });
-      }
-    },
-    [node.id, nodeData.model, updateNodeData]
-  );
-
-  const handleExternalModelChange = useCallback(
-    (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const modelId = e.target.value;
-      const model = externalModels.find(m => m.id === modelId);
-      if (model) {
-        const newSelectedModel: SelectedModel = {
-          provider: currentProvider,
-          modelId: model.id,
-          displayName: model.name,
-          capabilities: model.capabilities,
-        };
-        updateNodeData(node.id, { selectedModel: newSelectedModel, parameters: {} });
-      }
-    },
-    [node.id, currentProvider, externalModels, updateNodeData]
-  );
-
-  const handleModelChange = useCallback(
-    (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const model = e.target.value as ModelType;
-      updateNodeData(node.id, { model });
-      saveNanoBananaDefaults({ model });
-
-      const newSelectedModel: SelectedModel = {
-        provider: "gemini",
-        modelId: model,
-        displayName: GEMINI_IMAGE_MODELS.find(m => m.value === model)?.label || model,
-      };
-      updateNodeData(node.id, { selectedModel: newSelectedModel });
-    },
-    [node.id, updateNodeData]
-  );
+  }, [replicateEnabled, replicateApiKey, kieEnabled, kieApiKey, openaiEnabled, openaiApiKey]);
 
   const handleAspectRatioChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -387,7 +279,6 @@ function GenerateImageControls({ node }: { node: Node }) {
   const supportsResolution = currentModelId === "nano-banana-pro" || currentModelId === "nano-banana-2";
   const aspectRatios = currentModelId === "nano-banana-2" ? EXTENDED_ASPECT_RATIOS : BASE_ASPECT_RATIOS;
   const resolutions = currentModelId === "nano-banana-2" ? RESOLUTIONS_NB2 : RESOLUTIONS_PRO;
-  const hasExternalProviders = !!(replicateEnabled && replicateApiKey);
 
   return (
     <>

@@ -7,6 +7,10 @@
 const cache = new Map<string, string>();
 const pending = new Map<string, Promise<string>>();
 
+// Cap the cache to bound memory across long sessions with many workflow loads.
+// Map preserves insertion order, so the first key is the oldest.
+const MAX_CACHE_ENTRIES = 500;
+
 function cacheKey(src: string): string {
   // Sample from multiple positions + length to create a collision-resistant key
   // without hashing the entire multi-MB string.
@@ -20,7 +24,16 @@ export function getThumbnail(src: string): string | undefined {
 }
 
 export function setThumbnail(src: string, thumbnail: string): void {
-  cache.set(cacheKey(src), thumbnail);
+  const key = cacheKey(src);
+  // Re-insert to move an existing key to the newest position (LRU on write).
+  cache.delete(key);
+  cache.set(key, thumbnail);
+  if (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) {
+      cache.delete(oldest);
+    }
+  }
 }
 
 export function getPending(src: string): Promise<string> | undefined {
