@@ -71,7 +71,7 @@ export function FTUXModal({ onComplete, onStartTutorial }: FTUXModalProps) {
               <div className="flex items-center gap-2">
                 <img src="/banana_icon.png" alt="" className="w-6 h-6" />
                 <h2 className="text-xl font-medium text-neutral-100">
-                  Welcome to Node Banana
+                  Welcome to Justin Banana
                 </h2>
               </div>
               <button

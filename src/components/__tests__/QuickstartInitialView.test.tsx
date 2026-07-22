@@ -17,7 +17,7 @@ describe("QuickstartInitialView", () => {
   });
 
   describe("Basic Rendering", () => {
-    it("should render the Node Banana title and logo", () => {
+    it("should render the Justin Banana title and logo", () => {
       render(
         <QuickstartInitialView
           onNewProject={mockOnNewProject}
@@ -27,7 +27,7 @@ describe("QuickstartInitialView", () => {
         />
       );
 
-      expect(screen.getByText("Node Banana")).toBeInTheDocument();
+      expect(screen.getByText("Justin Banana")).toBeInTheDocument();
       expect(screen.getAllByAltText("").length).toBeGreaterThan(0); // Logo images
     });
 
