@@ -74,7 +74,7 @@ export async function generateWithOpenAI(
         Authorization: `Bearer ${apiKey}`,
       },
       body: formData,
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(300_000), // 5 min — gpt-image-2 edits can exceed 2 min
     });
   } else {
     // JSON payload for text-to-image generations
@@ -98,7 +98,7 @@ export async function generateWithOpenAI(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(300_000), // 5 min — gpt-image-2 edits can exceed 2 min
     });
   }
 
